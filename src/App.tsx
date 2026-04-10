@@ -156,7 +156,7 @@ export default function App() {
   const [loginPassword, setLoginPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
-  const [currentView, setCurrentView] = useState<'store' | 'vendor-dashboard'>('store');
+  const [currentView, setCurrentView] = useState<'store' | 'vendor-dashboard' | 'delivery-info'>('store');
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
   const [vendorFilter, setVendorFilter] = useState<string | null>(null);
   const [editingVendor, setEditingVendor] = useState<Vendor | null>(null);
@@ -167,6 +167,11 @@ export default function App() {
   const [newVendorCommission, setNewVendorCommission] = useState('10');
   const [activeTab, setActiveTab] = useState<'home' | 'orders' | 'profile'>('home');
   
+  // Vendor-specific view state
+  const [vendorSearchQuery, setVendorSearchQuery] = useState('');
+  const [vendorSortBy, setVendorSortBy] = useState<'newest' | 'price-asc' | 'price-desc'>('newest');
+  const [vendorCategoryFilter, setVendorCategoryFilter] = useState<'all' | 'chocolate_boxes' | 'hospitality_trays' | 'daily_sweets' | 'gift_boxes' | 'occasion_offers'>('all');
+
   // Search and Filter state
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<'all' | 'chocolate_boxes' | 'hospitality_trays' | 'daily_sweets' | 'gift_boxes' | 'occasion_offers' | 'discounts'>('all');
@@ -196,12 +201,18 @@ export default function App() {
     async function testConnection() {
       try {
         // Use a path that is allowed to be read (vendors is public read)
+        // Adding a small timeout to avoid race conditions during init
+        await new Promise(resolve => setTimeout(resolve, 1000));
         await getDocFromServer(doc(db, 'vendors', 'connection-test'));
       } catch (error) {
-        if (error instanceof Error && error.message.includes('the client is offline')) {
-          console.error("Firebase Configuration Error: The client is offline. Please check your API keys and Database ID.");
+        // Only log to console for the initial connection test to avoid intrusive UI
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        if (errorMessage.includes('the client is offline')) {
+          console.error("Firebase Configuration Error: The client is offline. This usually means the API Key or Project ID is incorrect, or the domain is not authorized.");
+        } else if (errorMessage.includes('permission-denied')) {
+          console.warn("Connection test: Permission denied (this is expected if the document doesn't exist and rules are strict).");
         } else {
-          console.error("Firebase Connection Error:", error);
+          console.warn("Initial Firebase connection test result:", errorMessage);
         }
       }
     }
@@ -246,16 +257,20 @@ export default function App() {
       snapshot.forEach((doc) => {
         vendorsList.push({ id: doc.id, ...doc.data() } as Vendor);
       });
+      
       if (vendorsList.length > 0) {
         setVendors(vendorsList);
       } else {
         // If Firestore is empty, initialize with default vendors
+        setVendors(initialVendors); // Fallback to local data immediately
         initialVendors.forEach(async (v) => {
           try {
             await setDoc(doc(db, 'vendors', v.id), {
               name: v.name,
               phone: v.phone,
-              commissionRate: v.commissionRate
+              commissionRate: v.commissionRate,
+              password: '123456789',
+              mustChangePassword: true
             });
           } catch (e) {
             // Silently fail for initial sync if not admin
@@ -285,6 +300,7 @@ export default function App() {
         setIsLoadingProducts(false);
       } else {
         // Initialize with default products if empty
+        setProducts(initialProducts); // Fallback to local data immediately
         initialProducts.forEach(async (p) => {
           try {
             await setDoc(doc(db, 'products', p.id), p);
@@ -292,7 +308,6 @@ export default function App() {
             // Silently fail
           }
         });
-        setProducts(initialProducts);
         setIsLoadingProducts(false);
       }
     }, (error) => {
@@ -329,6 +344,37 @@ export default function App() {
       return matchesVendor && matchesSearch && matchesCategory && matchesOccasion && matchesIngredient;
     });
   }, [products, searchQuery, selectedCategory, selectedOccasion, selectedIngredient, vendorFilter]);
+
+  const vendorProducts = useMemo(() => {
+    if (!vendorFilter) return [];
+    
+    let result = products.filter(p => p.vendorId === vendorFilter);
+    
+    // Search
+    if (vendorSearchQuery) {
+      result = result.filter(p => 
+        p.nameAr.toLowerCase().includes(vendorSearchQuery.toLowerCase()) ||
+        p.descriptionAr.toLowerCase().includes(vendorSearchQuery.toLowerCase())
+      );
+    }
+    
+    // Category
+    if (vendorCategoryFilter !== 'all') {
+      result = result.filter(p => p.category === vendorCategoryFilter);
+    }
+    
+    // Sort
+    if (vendorSortBy === 'price-asc') {
+      result.sort((a, b) => (a.discountPrice || a.price) - (b.discountPrice || b.price));
+    } else if (vendorSortBy === 'price-desc') {
+      result.sort((a, b) => (b.discountPrice || b.price) - (a.discountPrice || a.price));
+    } else {
+      // newest - assuming higher ID or just original order if no timestamp
+      result.reverse();
+    }
+    
+    return result;
+  }, [products, vendorFilter, vendorSearchQuery, vendorSortBy, vendorCategoryFilter]);
 
   const cartTotal = useMemo(() => {
     return cart.reduce((sum, item) => sum + (item.discountPrice || item.price) * item.quantity, 0);
@@ -469,9 +515,12 @@ export default function App() {
   const saveVendor = async () => {
     if (!newVendorName || !newVendorPhone) return;
     
+    // Normalize phone: remove all non-digits
+    const cleanPhone = newVendorPhone.replace(/\D/g, '');
+    
     const vendorData = {
       name: newVendorName,
-      phone: newVendorPhone,
+      phone: cleanPhone,
       email: newVendorEmail.toLowerCase(),
       commissionRate: parseFloat(newVendorCommission) / 100,
       password: '123456789',
@@ -480,7 +529,14 @@ export default function App() {
 
     try {
       if (editingVendor) {
-        await updateDoc(doc(db, 'vendors', editingVendor.id), vendorData);
+        // For updates, we don't necessarily want to reset the password unless specified
+        const updateData = {
+          name: newVendorName,
+          phone: cleanPhone,
+          email: newVendorEmail.toLowerCase(),
+          commissionRate: parseFloat(newVendorCommission) / 100,
+        };
+        await updateDoc(doc(db, 'vendors', editingVendor.id), updateData);
         setEditingVendor(null);
       } else {
         await addDoc(collection(db, 'vendors'), vendorData);
@@ -797,7 +853,10 @@ export default function App() {
           )}
           {/* Top Row: Location & Cart */}
           <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2 cursor-pointer group">
+            <div 
+              className="flex items-center gap-2 cursor-pointer group"
+              onClick={() => setCurrentView('delivery-info')}
+            >
               <div className="w-10 h-10 bg-primary/10 rounded-full flex items-center justify-center text-primary group-hover:bg-primary group-hover:text-white transition-colors">
                 <Truck className="w-5 h-5" />
               </div>
@@ -805,6 +864,7 @@ export default function App() {
                 <p className="text-[10px] text-muted-foreground font-bold uppercase tracking-wider">التوصيل إلى</p>
                 <div className="flex items-center gap-1">
                   <span className="font-bold text-sm">المنزل - الرياض، حي النرجس</span>
+                  <Truck className="w-3 h-3 text-primary opacity-0 group-hover:opacity-100 transition-opacity" />
                   <ChevronRight className="w-4 h-4 text-primary" />
                 </div>
               </div>
@@ -910,7 +970,45 @@ export default function App() {
       </header>
 
       <main className="container mx-auto px-4 py-6 space-y-8">
-        {currentView === 'vendor-dashboard' && currentVendor ? (
+        {currentView === 'delivery-info' ? (
+          <motion.div
+            initial={{ opacity: 0, x: 20 }}
+            animate={{ opacity: 1, x: 0 }}
+            className="space-y-6"
+          >
+            <div className="flex items-center gap-4">
+              <Button 
+                variant="ghost" 
+                size="icon" 
+                className="rounded-full"
+                onClick={() => setCurrentView('store')}
+              >
+                <ChevronRight className="w-6 h-6" />
+              </Button>
+              <h2 className="text-2xl font-bold">معلومات التوصيل</h2>
+            </div>
+            
+            <Card className="rounded-3xl border-none shadow-sm overflow-hidden">
+              <CardContent className="p-12 flex flex-col items-center text-center space-y-6">
+                <div className="w-24 h-24 bg-primary/10 rounded-full flex items-center justify-center text-primary">
+                  <Truck className="w-12 h-12" />
+                </div>
+                <div className="space-y-2">
+                  <h3 className="text-xl font-bold">سيتم تنفيذ هذا القسم قريباً</h3>
+                  <p className="text-muted-foreground max-w-xs mx-auto">
+                    نحن نعمل على تطوير نظام تتبع الطلبات ومعلومات التوصيل المتقدمة.
+                  </p>
+                </div>
+                <Button 
+                  className="rounded-xl px-8"
+                  onClick={() => setCurrentView('store')}
+                >
+                  العودة للتسوق
+                </Button>
+              </CardContent>
+            </Card>
+          </motion.div>
+        ) : currentView === 'vendor-dashboard' && currentVendor ? (
           <motion.div 
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
@@ -1074,6 +1172,107 @@ export default function App() {
           </motion.div>
         ) : (
           <>
+            {/* Vendor Header if filtered */}
+            {vendorFilter && vendors.find(v => v.id === vendorFilter) && (
+              <motion.section 
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="bg-white p-6 rounded-3xl shadow-sm border mb-8"
+              >
+                <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
+                  <div className="flex items-center gap-4">
+                    <div className="w-16 h-16 bg-primary/10 rounded-2xl flex items-center justify-center text-primary">
+                      <Store className="w-8 h-8" />
+                    </div>
+                    <div>
+                      <h2 className="text-2xl font-bold">{vendors.find(v => v.id === vendorFilter)?.name}</h2>
+                      <p className="text-muted-foreground">تصفح جميع منتجات هذا المتجر</p>
+                    </div>
+                  </div>
+                  <Button 
+                    variant="outline" 
+                    className="rounded-xl"
+                    onClick={() => {
+                      setVendorFilter(null);
+                      const url = new URL(window.location.href);
+                      url.searchParams.delete('v');
+                      window.history.pushState({}, '', url);
+                    }}
+                  >
+                    عرض جميع المتاجر
+                  </Button>
+                </div>
+
+                <Separator className="my-6" />
+
+                <div className="space-y-6">
+                  <div className="flex flex-col md:flex-row gap-4">
+                    <div className="relative flex-1">
+                      <Search className="absolute right-4 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+                      <Input 
+                        placeholder="ابحث في منتجات المتجر..." 
+                        className="pr-10 rounded-xl h-12 bg-secondary/20 border-none"
+                        value={vendorSearchQuery}
+                        onChange={(e) => setVendorSearchQuery(e.target.value)}
+                      />
+                    </div>
+                    <div className="flex gap-2">
+                      <Select value={vendorCategoryFilter} onValueChange={(v: any) => setVendorCategoryFilter(v)}>
+                        <SelectTrigger className="w-[140px] rounded-xl h-12 bg-secondary/20 border-none">
+                          <SelectValue placeholder="التصنيف" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="all">جميع التصنيفات</SelectItem>
+                          <SelectItem value="chocolate_boxes">بوكسات شوكولاتة</SelectItem>
+                          <SelectItem value="hospitality_trays">صواني ضيافة</SelectItem>
+                          <SelectItem value="daily_sweets">حلويات يومية</SelectItem>
+                          <SelectItem value="gift_boxes">صناديق هدايا</SelectItem>
+                          <SelectItem value="occasion_offers">عروض المناسبات</SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <Select value={vendorSortBy} onValueChange={(v: any) => setVendorSortBy(v)}>
+                        <SelectTrigger className="w-[140px] rounded-xl h-12 bg-secondary/20 border-none">
+                          <SelectValue placeholder="ترتيب حسب" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="newest">الأحدث</SelectItem>
+                          <SelectItem value="price-asc">السعر: من الأقل</SelectItem>
+                          <SelectItem value="price-desc">السعر: من الأعلى</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+
+                  {vendorProducts.length > 0 ? (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+                      <AnimatePresence mode="popLayout">
+                        {vendorProducts.map((product) => (
+                          <ProductCard 
+                            key={product.id} 
+                            product={product} 
+                            allProducts={products}
+                            onAdd={addToCart} 
+                            onReview={() => setReviewingProduct(product)}
+                            isAdding={addingToCart[product.id]}
+                            isSaved={savedItems.some(item => item.id === product.id)}
+                            onToggleSave={toggleSaveItem}
+                            onQuickView={() => setQuickViewProduct(product)}
+                          />
+                        ))}
+                      </AnimatePresence>
+                    </div>
+                  ) : (
+                    <div className="py-20 text-center space-y-4">
+                      <div className="w-20 h-20 bg-secondary/20 rounded-full flex items-center justify-center mx-auto">
+                        <Search className="w-10 h-10 text-muted-foreground opacity-20" />
+                      </div>
+                      <p className="text-muted-foreground">لم يتم العثور على منتجات تطابق بحثك في هذا المتجر.</p>
+                    </div>
+                  )}
+                </div>
+              </motion.section>
+            )}
+
             {/* Banner Carousel */}
         <section className="relative">
           <ScrollArea className="w-full whitespace-nowrap rounded-2xl">

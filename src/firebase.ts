@@ -13,10 +13,26 @@ const firebaseConfig = {
   appId: (import.meta.env.VITE_FIREBASE_APP_ID && import.meta.env.VITE_FIREBASE_APP_ID !== "") ? import.meta.env.VITE_FIREBASE_APP_ID : firebaseAppletConfig.appId,
 };
 
-const databaseId = (import.meta.env.VITE_FIREBASE_DATABASE_ID && import.meta.env.VITE_FIREBASE_DATABASE_ID !== "") ? import.meta.env.VITE_FIREBASE_DATABASE_ID : firebaseAppletConfig.firestoreDatabaseId;
+const databaseId = (import.meta.env.VITE_FIREBASE_DATABASE_ID && import.meta.env.VITE_FIREBASE_DATABASE_ID !== "") 
+  ? import.meta.env.VITE_FIREBASE_DATABASE_ID 
+  : firebaseAppletConfig.firestoreDatabaseId;
 
 const app = initializeApp(firebaseConfig);
-export const db = getFirestore(app, databaseId);
+
+// Initialize Firestore with a fallback mechanism
+let firestoreDb;
+try {
+  if (databaseId && databaseId !== "(default)") {
+    firestoreDb = getFirestore(app, databaseId);
+  } else {
+    firestoreDb = getFirestore(app);
+  }
+} catch (e) {
+  console.error("Failed to initialize Firestore with databaseId:", databaseId, e);
+  firestoreDb = getFirestore(app);
+}
+
+export const db = firestoreDb;
 export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();
 export { signInWithPopup };
