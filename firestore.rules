@@ -1,0 +1,54 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isAdmin() {
+      return isAuthenticated() && 
+        (request.auth.token.email == "aboodvv20@gmail.com" && request.auth.token.email_verified == true);
+    }
+
+    function isValidVendor(data) {
+      return data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
+             data.phone is string && data.phone.size() > 0 && data.phone.size() < 20 &&
+             data.commissionRate is number && data.commissionRate >= 0 && data.commissionRate <= 1;
+    }
+
+    function isValidOrder(data) {
+      return data.customerName is string && data.customerName.size() > 0 &&
+             data.phone is string && data.phone.size() > 0 &&
+             data.total is number && data.total >= 0;
+    }
+
+    function isValidProduct(data) {
+      return data.nameAr is string && data.nameAr.size() > 0 &&
+             data.price is number && data.price >= 0 &&
+             data.vendorId is string;
+    }
+
+    match /vendors/{vendorId} {
+      allow read: if true;
+      allow create: if isValidVendor(request.resource.data);
+      allow update: if isAdmin() || 
+                    (isAuthenticated() && request.auth.uid == resource.data.userId) || 
+                    (isAuthenticated() && !('userId' in resource.data)) ||
+                    (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['password', 'mustChangePassword']));
+      allow delete: if isAdmin();
+    }
+
+    match /orders/{orderId} {
+      allow read: if isAdmin();
+      allow create: if isValidOrder(request.resource.data);
+    }
+
+    match /products/{productId} {
+      allow read: if true;
+      allow create: if isAdmin() || (isAuthenticated() && isValidProduct(request.resource.data) && request.auth.uid == request.resource.data.vendorUserId);
+      allow update: if isAdmin() || (isAuthenticated() && isValidProduct(request.resource.data) && request.auth.uid == resource.data.vendorUserId);
+      allow delete: if isAdmin() || (isAuthenticated() && request.auth.uid == resource.data.vendorUserId);
+    }
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "entities": {
+    "Vendor": {
+      "title": "Vendor",
+      "description": "A seller on the platform",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "phone": { "type": "string" },
+        "commissionRate": { "type": "number" }
+      },
+      "required": ["name", "phone", "commissionRate"]
+    },
+    "Order": {
+      "title": "Order",
+      "description": "A customer order",
+      "type": "object",
+      "properties": {
+        "customerName": { "type": "string" },
+        "phone": { "type": "string" },
+        "address": { "type": "string" },
+        "deliveryType": { "type": "string" },
+        "paymentMethod": { "type": "string" },
+        "total": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["customerName", "phone", "total"]
+    }
+  },
+  "firestore": {
+    "/vendors/{vendorId}": {
+      "schema": "Vendor",
+      "description": "Collection of vendors"
+    },
+    "/orders/{orderId}": {
+      "schema": "Order",
+      "description": "Collection of orders"
+    }
+  }
+}
