@@ -195,10 +195,13 @@ export default function App() {
   React.useEffect(() => {
     async function testConnection() {
       try {
-        await getDocFromServer(doc(db, 'test', 'connection'));
+        // Use a path that is allowed to be read (vendors is public read)
+        await getDocFromServer(doc(db, 'vendors', 'connection-test'));
       } catch (error) {
         if (error instanceof Error && error.message.includes('the client is offline')) {
-          console.error("Please check your Firebase configuration.");
+          console.error("Firebase Configuration Error: The client is offline. Please check your API keys and Database ID.");
+        } else {
+          console.error("Firebase Connection Error:", error);
         }
       }
     }
@@ -534,11 +537,34 @@ export default function App() {
 
   const handleVendorLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    const vendor = vendors.find(v => v.phone === loginPhone && (v as any).password === loginPassword);
+    
+    // Normalize input phone: remove all non-digits
+    const cleanInputPhone = loginPhone.replace(/\D/g, '');
+    const normalizedInputPhone = cleanInputPhone.startsWith('0') ? cleanInputPhone.substring(1) : cleanInputPhone;
+
+    const vendor = vendors.find(v => {
+      // Normalize stored phone: remove all non-digits
+      const cleanStoredPhone = v.phone.replace(/\D/g, '');
+      const normalizedStoredPhone = cleanStoredPhone.startsWith('0') ? cleanStoredPhone.substring(1) : cleanStoredPhone;
+      
+      const phoneMatches = cleanStoredPhone === cleanInputPhone || 
+                           normalizedStoredPhone === normalizedInputPhone ||
+                           cleanStoredPhone.endsWith(normalizedInputPhone) ||
+                           cleanInputPhone.endsWith(normalizedStoredPhone);
+      
+      // Handle missing password field (default to 123456789)
+      const storedPassword = (v as any).password || '123456789';
+      const passwordMatches = storedPassword === loginPassword;
+      
+      return phoneMatches && passwordMatches;
+    });
     
     if (vendor) {
       setCurrentVendor(vendor);
-      if (vendor.mustChangePassword) {
+      // If password field is missing, it's effectively "must change password"
+      const needsPasswordChange = vendor.mustChangePassword !== false && ((vendor as any).password === undefined || vendor.mustChangePassword);
+      
+      if (needsPasswordChange) {
         setIsChangePasswordOpen(true);
       } else {
         setIsLoginDialogOpen(false);
@@ -1509,7 +1535,7 @@ export default function App() {
               <Label htmlFor="login-phone">رقم الجوال</Label>
               <Input 
                 id="login-phone" 
-                placeholder="05xxxxxxxx" 
+                placeholder="مثال: 05xxxxxxxx أو 9665xxxxxxxx" 
                 value={loginPhone}
                 onChange={e => setLoginPhone(e.target.value)}
                 required 
@@ -1529,7 +1555,13 @@ export default function App() {
                 <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
               </div>
             </div>
-            <Button type="submit" className="w-full h-12 rounded-xl text-lg font-bold">دخول</Button>
+            <Button 
+              type="submit" 
+              className="w-full h-12 rounded-xl text-lg font-bold"
+              disabled={vendors.length === 0}
+            >
+              {vendors.length === 0 ? 'جاري تحميل البيانات...' : 'دخول'}
+            </Button>
             <div className="text-center">
               <p className="text-xs text-muted-foreground">هل أنت مسؤول؟ <button type="button" onClick={login} className="text-primary font-bold">دخول المسؤول</button></p>
             </div>
@@ -1723,7 +1755,7 @@ export default function App() {
                   onChange={e => setNewVendorName(e.target.value)}
                 />
                 <Input 
-                  placeholder="رقم الواتساب (966...)" 
+                  placeholder="رقم الواتساب (مثال: 9665xxxxxxxx)" 
                   value={newVendorPhone}
                   onChange={e => setNewVendorPhone(e.target.value)}
                 />
