@@ -47,11 +47,28 @@ export interface OrderDetails {
   phone: string;
   address: string;
   deliveryType: 'delivery' | 'pickup';
-  paymentMethod: 'cash' | 'card';
+  paymentMethod: 'cash' | 'card' | 'apple_pay' | 'stc_pay' | 'bank_transfer';
   preOrderDate?: Date;
   isGift: boolean;
   giftMessage?: string;
   giftCardDesign?: string;
   items: CartItem[];
   total: number;
+}
+
+export interface Banner {
+  id: string;
+  image: string;
+  title: string;
+  subtitle: string;
+  order: number;
+  location: 'top' | 'middle' | 'bottom';
+}
+
+export interface Category {
+  id: string;
+  name: string;
+  icon: string;
+  image: string;
+  order: number;
 }

@@ -38,7 +38,13 @@ import {
   Pencil,
   Lock,
   LogIn,
-  KeyRound
+  KeyRound,
+  Upload,
+  Image as ImageIcon,
+  Settings,
+  Landmark,
+  Smartphone,
+  Wallet
 } from 'lucide-react';
 import { format } from 'date-fns';
 import { ar } from 'date-fns/locale';
@@ -59,9 +65,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 
 import { products as initialProducts } from './data/products';
 import { vendors as initialVendors } from './data/vendors';
-import { Product, CartItem, OrderDetails, Review, Vendor } from './types';
+import { Product, CartItem, OrderDetails, Review, Vendor, Banner, Category } from './types';
 import { cn } from '@/lib/utils';
-import { db, auth, googleProvider, signInWithPopup } from './firebase';
+import { db, auth, storage, googleProvider, signInWithPopup } from './firebase';
 import { 
   collection, 
   onSnapshot, 
@@ -76,6 +82,11 @@ import {
   deleteDoc
 } from 'firebase/firestore';
 import { User } from 'firebase/auth';
+import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import { loadStripe } from '@stripe/stripe-js';
+import { Elements, CardElement, useStripe, useElements, PaymentRequestButtonElement } from '@stripe/react-stripe-js';
+
+const stripePromise = loadStripe(import.meta.env.VITE_STRIPE_PUBLISHABLE_KEY);
 
 // --- Error Handling Types ---
 enum OperationType {
@@ -133,6 +144,417 @@ function handleFirestoreError(error: unknown, operationType: OperationType, path
   }
 }
 
+// --- Stripe Checkout Form Component ---
+const CheckoutForm = ({ 
+  customerName, setCustomerName, 
+  phone, setPhone, 
+  address, setAddress, 
+  deliveryType, setDeliveryType, 
+  paymentMethod, setPaymentMethod, 
+  preOrderDate, setPreOrderDate, 
+  isGift, setIsGift, 
+  giftMessage, setGiftMessage, 
+  giftCardDesign, setGiftCardDesign, 
+  cartTotal, 
+  onSuccess,
+  isProcessingPayment,
+  setIsProcessingPayment,
+  bankDetails 
+}: any) => {
+  const stripe = useStripe();
+  const elements = useElements();
+  const [paymentRequest, setPaymentRequest] = useState<any>(null);
+  const [stripeError, setStripeError] = useState<string | null>(null);
+
+  React.useEffect(() => {
+    if (stripe) {
+      const pr = stripe.paymentRequest({
+        country: 'US', // Fixed to US for Payment Request Button compatibility in some regions
+        currency: 'sar',
+        total: {
+          label: 'إجمالي الطلب',
+          amount: Math.round((cartTotal + (deliveryType === 'delivery' ? 15 : 0)) * 100),
+        },
+        requestPayerName: true,
+        requestPayerPhone: true,
+      });
+
+      pr.canMakePayment().then(result => {
+        if (result) {
+          setPaymentRequest(pr);
+        }
+      });
+
+      pr.on('paymentmethod', async (ev) => {
+        setIsProcessingPayment(true);
+        setStripeError(null);
+        try {
+          const response = await fetch('/api/create-payment-intent', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ amount: cartTotal + (deliveryType === 'delivery' ? 15 : 0) }),
+          });
+          const data = await response.json();
+          
+          if (data.error) throw new Error(data.error);
+
+          const { paymentIntent, error: confirmError } = await stripe.confirmCardPayment(
+            data.clientSecret,
+            { payment_method: ev.paymentMethod.id },
+            { handleActions: false }
+          );
+
+          if (confirmError) {
+            ev.complete('fail');
+            throw new Error(confirmError.message);
+          } else {
+            ev.complete('success');
+            if (paymentIntent.status === "requires_action") {
+              const { error: actionError } = await stripe.confirmCardPayment(data.clientSecret);
+              if (actionError) throw new Error(actionError.message);
+            }
+            onSuccess();
+          }
+        } catch (err: any) {
+          setStripeError(err.message);
+        } finally {
+          setIsProcessingPayment(false);
+        }
+      });
+    }
+  }, [stripe, cartTotal, deliveryType]);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setStripeError(null);
+    
+    if (paymentMethod === 'card') {
+      if (!stripe || !elements) return;
+      setIsProcessingPayment(true);
+
+      try {
+        const response = await fetch('/api/create-payment-intent', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ amount: cartTotal + (deliveryType === 'delivery' ? 15 : 0) }),
+        });
+        const data = await response.json();
+        
+        if (data.error) throw new Error(data.error);
+
+        const result = await stripe.confirmCardPayment(data.clientSecret, {
+          payment_method: {
+            card: elements.getElement(CardElement) as any,
+            billing_details: {
+              name: customerName,
+              phone: phone,
+            },
+          },
+        });
+
+        if (result.error) {
+          throw new Error(result.error.message);
+        }
+      } catch (err: any) {
+        setStripeError(err.message);
+        setIsProcessingPayment(false);
+        return;
+      }
+      setIsProcessingPayment(false);
+    } else if (['stc_pay'].includes(paymentMethod)) {
+      // Apple Pay is handled by PaymentRequestButton
+      setIsProcessingPayment(true);
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      setIsProcessingPayment(false);
+    }
+
+    onSuccess();
+  };
+
+  return (
+    <form onSubmit={handleSubmit} className="space-y-6 py-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className="space-y-2">
+          <Label htmlFor="name">الاسم بالكامل</Label>
+          <Input 
+            id="name" 
+            placeholder="أدخل اسمك" 
+            required 
+            value={customerName}
+            onChange={e => setCustomerName(e.target.value)}
+          />
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="phone">رقم الجوال</Label>
+          <Input 
+            id="phone" 
+            placeholder="05xxxxxxxx" 
+            required 
+            value={phone}
+            onChange={e => setPhone(e.target.value)}
+          />
+        </div>
+      </div>
+
+      <div className="space-y-2">
+        <Label>طريقة الاستلام</Label>
+        <div className="grid grid-cols-2 gap-4">
+          <Button 
+            type="button"
+            variant={deliveryType === 'delivery' ? 'default' : 'outline'}
+            className="h-14 rounded-xl gap-2"
+            onClick={() => setDeliveryType('delivery')}
+          >
+            <Truck className="w-5 h-5" />
+            توصيل
+          </Button>
+          <Button 
+            type="button"
+            variant={deliveryType === 'pickup' ? 'default' : 'outline'}
+            className="h-14 rounded-xl gap-2"
+            onClick={() => setDeliveryType('pickup')}
+          >
+            <Store className="w-5 h-5" />
+            استلام من الفرع
+          </Button>
+        </div>
+      </div>
+
+      {deliveryType === 'delivery' && (
+        <div className="space-y-2">
+          <Label htmlFor="address">عنوان التوصيل</Label>
+          <Input 
+            id="address" 
+            placeholder="الحي، الشارع، رقم المنزل" 
+            required 
+            value={address}
+            onChange={e => setAddress(e.target.value)}
+          />
+        </div>
+      )}
+
+      <div className="space-y-2">
+        <Label>طلب مسبق (اختياري)</Label>
+        <Popover>
+          <PopoverTrigger
+            className={cn(
+              buttonVariants({ variant: "outline" }),
+              "w-full h-12 justify-start text-right font-normal rounded-xl",
+              !preOrderDate && "text-muted-foreground"
+            )}
+          >
+            <CalendarIcon className="ml-2 h-4 w-4" />
+            {preOrderDate ? format(preOrderDate, "PPP", { locale: ar }) : <span>اختر تاريخ الطلب المسبق</span>}
+          </PopoverTrigger>
+          <PopoverContent className="w-auto p-0" align="start">
+            <Calendar
+              mode="single"
+              selected={preOrderDate}
+              onSelect={setPreOrderDate}
+              initialFocus
+              locale={ar}
+            />
+          </PopoverContent>
+        </Popover>
+      </div>
+
+      <div className="space-y-2">
+        <Label>طريقة الدفع</Label>
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+          <Button 
+            type="button"
+            variant={paymentMethod === 'cash' ? 'default' : 'outline'}
+            className="h-14 rounded-xl gap-2 text-xs"
+            onClick={() => setPaymentMethod('cash')}
+          >
+            <Banknote className="w-4 h-4" />
+            كاش
+          </Button>
+          <Button 
+            type="button"
+            variant={paymentMethod === 'card' ? 'default' : 'outline'}
+            className="h-14 rounded-xl gap-2 text-xs"
+            onClick={() => setPaymentMethod('card')}
+          >
+            <CreditCard className="w-4 h-4" />
+            بطاقة
+          </Button>
+          <Button 
+            type="button"
+            variant={paymentMethod === 'apple_pay' ? 'default' : 'outline'}
+            className="h-14 rounded-xl gap-2 text-xs"
+            onClick={() => setPaymentMethod('apple_pay')}
+          >
+            <Smartphone className="w-4 h-4" />
+            Apple Pay
+          </Button>
+          <Button 
+            type="button"
+            variant={paymentMethod === 'stc_pay' ? 'default' : 'outline'}
+            className="h-14 rounded-xl gap-2 text-xs"
+            onClick={() => setPaymentMethod('stc_pay')}
+          >
+            <Wallet className="w-4 h-4" />
+            STC Pay
+          </Button>
+          <Button 
+            type="button"
+            variant={paymentMethod === 'bank_transfer' ? 'default' : 'outline'}
+            className="h-14 rounded-xl gap-2 text-xs"
+            onClick={() => setPaymentMethod('bank_transfer')}
+          >
+            <Landmark className="w-4 h-4" />
+            تحويل
+          </Button>
+        </div>
+      </div>
+
+      {paymentMethod === 'card' && (
+        <div className="p-4 bg-secondary/5 rounded-2xl border border-input">
+          <Label className="mb-2 block">بيانات البطاقة</Label>
+          <div className="p-3 bg-white rounded-xl border">
+            <CardElement options={{
+              style: {
+                base: {
+                  fontSize: '16px',
+                  color: '#424770',
+                  '::placeholder': {
+                    color: '#aab7c4',
+                  },
+                },
+                invalid: {
+                  color: '#9e2146',
+                },
+              },
+            }} />
+          </div>
+        </div>
+      )}
+
+      {stripeError && (
+        <div className="p-3 bg-destructive/10 text-destructive text-xs rounded-xl border border-destructive/20 text-center">
+          {stripeError}
+        </div>
+      )}
+
+      {paymentMethod === 'apple_pay' && (
+        <div className="space-y-4">
+          {paymentRequest ? (
+            <div className="p-4 bg-secondary/5 rounded-2xl border border-input">
+              <Label className="mb-4 block text-center font-bold">ادفع بسرعة وأمان</Label>
+              <PaymentRequestButtonElement options={{ paymentRequest }} />
+            </div>
+          ) : (
+            <div className="p-4 bg-yellow-50 rounded-2xl border border-yellow-100 text-center">
+              <p className="text-xs text-yellow-800">Apple Pay غير مدعوم على هذا المتصفح أو الجهاز حالياً.</p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {paymentMethod === 'bank_transfer' && (
+        <div className="p-4 bg-primary/5 rounded-2xl border border-primary/10 space-y-2">
+          <p className="text-xs font-bold text-primary">بيانات التحويل البنكي:</p>
+          <div className="text-[10px] space-y-1">
+            <p>البنك: {bankDetails.bankName}</p>
+            <p>الاسم: {bankDetails.accountName}</p>
+            <p className="font-mono">IBAN: {bankDetails.iban}</p>
+          </div>
+          <p className="text-[10px] text-muted-foreground">يرجى إرفاق صورة التحويل عند التواصل عبر الواتساب.</p>
+        </div>
+      )}
+
+      <div className="space-y-4 border-t pt-4">
+        <div className="flex items-center justify-between">
+          <div className="space-y-0.5">
+            <Label className="text-base">هل هذا الطلب هدية؟</Label>
+            <p className="text-sm text-muted-foreground">سنقوم بإضافة بطاقة إهداء أنيقة مع طلبك.</p>
+          </div>
+          <Checkbox 
+            checked={isGift} 
+            onCheckedChange={(checked) => setIsGift(checked as boolean)}
+            className="h-6 w-6 rounded-md"
+          />
+        </div>
+
+        {isGift && (
+          <motion.div 
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            className="space-y-4 pt-2"
+          >
+            <div className="space-y-2">
+              <Label>اختر تصميم البطاقة</Label>
+              <div className="grid grid-cols-3 gap-2">
+                {[
+                  { id: 'classic', label: 'كلاسيك', color: 'bg-[#3E2723]' },
+                  { id: 'gold', label: 'ذهبي', color: 'bg-[#D4AF37]' },
+                  { id: 'floral', label: 'وردي', color: 'bg-[#F5E6E8]' }
+                ].map((design) => (
+                  <button
+                    key={design.id}
+                    type="button"
+                    onClick={() => setGiftCardDesign(design.id)}
+                    className={cn(
+                      "flex flex-col items-center gap-2 p-3 rounded-xl border-2 transition-all",
+                      giftCardDesign === design.id ? "border-primary bg-primary/5" : "border-transparent bg-secondary/20"
+                    )}
+                  >
+                    <div className={cn("w-full h-8 rounded-md shadow-sm", design.color)} />
+                    <span className="text-xs font-bold">{design.label}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="gift-message">رسالة الإهداء</Label>
+              <textarea 
+                id="gift-message"
+                className="w-full min-h-[100px] rounded-xl border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                placeholder="اكتب رسالتك هنا..."
+                value={giftMessage}
+                onChange={e => setGiftMessage(e.target.value)}
+              />
+            </div>
+          </motion.div>
+        )}
+      </div>
+
+      <Separator />
+
+      <div className="bg-secondary/10 p-4 rounded-xl space-y-2">
+        <div className="flex justify-between text-sm">
+          <span>قيمة المنتجات:</span>
+          <span>{cartTotal} ر.س</span>
+        </div>
+        <div className="flex justify-between text-sm">
+          <span>رسوم التوصيل:</span>
+          <span>{deliveryType === 'delivery' ? '15 ر.س' : '0 ر.س'}</span>
+        </div>
+        <div className="flex justify-between text-lg font-bold text-primary pt-2 border-t">
+          <span>الإجمالي النهائي:</span>
+          <span>{cartTotal + (deliveryType === 'delivery' ? 15 : 0)} ر.س</span>
+        </div>
+      </div>
+
+      <Button 
+        type="submit" 
+        className="w-full h-14 text-lg font-bold rounded-xl shadow-lg gap-2"
+        disabled={isProcessingPayment}
+      >
+        {isProcessingPayment ? (
+          <>
+            <Loader2 className="w-5 h-5 animate-spin" />
+            جاري معالجة الدفع...
+          </>
+        ) : (
+          'تأكيد الطلب'
+        )}
+      </Button>
+    </form>
+  );
+};
+
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [isAuthReady, setIsAuthReady] = useState(false);
@@ -146,6 +568,10 @@ export default function App() {
   const [isCartOpen, setIsCartOpen] = useState(false);
   const [isSavedOpen, setIsSavedOpen] = useState(false);
   const [isCheckoutOpen, setIsCheckoutOpen] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [bankDetails, setBankDetails] = useState({ bankName: 'الراجحي', accountName: 'متجر شوكولاتة السعادة', iban: 'SA0000000000000000000000' });
+  const [banners, setBanners] = useState<Banner[]>([]);
+  const [categories, setCategories] = useState<Category[]>([]);
   const [orderSuccess, setOrderSuccess] = useState(false);
   const [lastOrder, setLastOrder] = useState<OrderDetails | null>(null);
   const [isVendorManagerOpen, setIsVendorManagerOpen] = useState(false);
@@ -156,8 +582,18 @@ export default function App() {
   const [loginPassword, setLoginPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
-  const [currentView, setCurrentView] = useState<'store' | 'vendor-dashboard' | 'delivery-info'>('store');
+  const [currentView, setCurrentView] = useState<'store' | 'vendor-dashboard' | 'delivery-info' | 'admin-settings'>('store');
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
+  const [editingBanner, setEditingBanner] = useState<Banner | null>(null);
+  const [editingCategory, setEditingCategory] = useState<Category | null>(null);
+  const [bannerImageFile, setBannerImageFile] = useState<File | null>(null);
+  const [bannerImagePreview, setBannerImagePreview] = useState<string | null>(null);
+  const [categoryImageFile, setCategoryImageFile] = useState<File | null>(null);
+  const [categoryImagePreview, setCategoryImagePreview] = useState<string | null>(null);
+  const [productImageFile, setProductImageFile] = useState<File | null>(null);
+  const [productImagePreview, setProductImagePreview] = useState<string | null>(null);
+  const [isUploadingImage, setIsUploadingImage] = useState(false);
+  const [isProcessingPayment, setIsProcessingPayment] = useState(false);
   const [vendorFilter, setVendorFilter] = useState<string | null>(null);
   const [editingVendor, setEditingVendor] = useState<Vendor | null>(null);
   const [currentVendor, setCurrentVendor] = useState<Vendor | null>(null);
@@ -183,7 +619,7 @@ export default function App() {
   const [phone, setPhone] = useState('');
   const [address, setAddress] = useState('');
   const [deliveryType, setDeliveryType] = useState<'delivery' | 'pickup'>('delivery');
-  const [paymentMethod, setPaymentMethod] = useState<'cash' | 'card'>('cash');
+  const [paymentMethod, setPaymentMethod] = useState<'cash' | 'card' | 'apple_pay' | 'stc_pay' | 'bank_transfer'>('cash');
   const [preOrderDate, setPreOrderDate] = useState<Date | undefined>(undefined);
   const [isGift, setIsGift] = useState(false);
   const [giftMessage, setGiftMessage] = useState('');
@@ -195,6 +631,33 @@ export default function App() {
   const [quickViewProduct, setQuickViewProduct] = useState<Product | null>(null);
   const [newRating, setNewRating] = useState(5);
   const [newComment, setNewComment] = useState('');
+
+  React.useEffect(() => {
+    if (editingProduct) {
+      setProductImagePreview(editingProduct.image);
+    } else {
+      setProductImagePreview(null);
+      setProductImageFile(null);
+    }
+  }, [editingProduct]);
+
+  React.useEffect(() => {
+    if (editingBanner) {
+      setBannerImagePreview(editingBanner.image);
+    } else {
+      setBannerImagePreview(null);
+      setBannerImageFile(null);
+    }
+  }, [editingBanner]);
+
+  React.useEffect(() => {
+    if (editingCategory) {
+      setCategoryImagePreview(editingCategory.image);
+    } else {
+      setCategoryImagePreview(null);
+      setCategoryImageFile(null);
+    }
+  }, [editingCategory]);
 
   // Test Firebase Connection
   React.useEffect(() => {
@@ -279,6 +742,66 @@ export default function App() {
       }
     }, (error) => {
       handleFirestoreError(error, OperationType.LIST, path, setFirestoreError);
+    });
+
+    return () => unsubscribe();
+  }, [isAuthReady]);
+
+  React.useEffect(() => {
+    if (!isAuthReady) return;
+
+    const path = 'banners';
+    const q = query(collection(db, path), orderBy('order', 'asc'));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const bannersList: Banner[] = [];
+      snapshot.forEach((doc) => {
+        bannersList.push({ id: doc.id, ...doc.data() } as Banner);
+      });
+      
+      if (bannersList.length > 0) {
+        setBanners(bannersList);
+      } else {
+        const initialBanners: Banner[] = [
+          { id: '1', image: 'https://picsum.photos/seed/banner1/800/400', title: 'خصم 20% على بوكسات الشوكولاتة', subtitle: 'استخدم كود: CHOC20', order: 1, location: 'top' },
+          { id: '2', image: 'https://picsum.photos/seed/banner2/800/400', title: 'صواني ضيافة ملكية لجميع مناسباتكم', subtitle: 'اطلب الآن', order: 2, location: 'top' },
+          { id: '3', image: 'https://picsum.photos/seed/banner3/800/400', title: 'توصيل مجاني للطلبات فوق 200 ريال', subtitle: 'لفترة محدودة', order: 3, location: 'top' },
+        ];
+        setBanners(initialBanners);
+        initialBanners.forEach(async (b) => {
+          try { await setDoc(doc(db, 'banners', b.id), b); } catch (e) {}
+        });
+      }
+    });
+
+    return () => unsubscribe();
+  }, [isAuthReady]);
+
+  React.useEffect(() => {
+    if (!isAuthReady) return;
+
+    const path = 'categories';
+    const q = query(collection(db, path), orderBy('order', 'asc'));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const categoriesList: Category[] = [];
+      snapshot.forEach((doc) => {
+        categoriesList.push({ id: doc.id, ...doc.data() } as Category);
+      });
+      
+      if (categoriesList.length > 0) {
+        setCategories(categoriesList);
+      } else {
+        const initialCategories: Category[] = [
+          { id: 'chocolate_boxes', name: 'بوكسات', icon: '🍫', image: 'https://picsum.photos/seed/cat1/200/200', order: 1 },
+          { id: 'hospitality_trays', name: 'صواني', icon: '🍽️', image: 'https://picsum.photos/seed/cat2/200/200', order: 2 },
+          { id: 'daily_sweets', name: 'يومي', icon: '🍰', image: 'https://picsum.photos/seed/cat3/200/200', order: 3 },
+          { id: 'gift_boxes', name: 'هدايا', icon: '🎁', image: 'https://picsum.photos/seed/cat4/200/200', order: 4 },
+          { id: 'occasion_offers', name: 'عروض', icon: '🎉', image: 'https://picsum.photos/seed/cat5/200/200', order: 5 },
+        ];
+        setCategories(initialCategories);
+        initialCategories.forEach(async (c) => {
+          try { await setDoc(doc(db, 'categories', c.id), c); } catch (e) {}
+        });
+      }
     });
 
     return () => unsubscribe();
@@ -459,9 +982,16 @@ export default function App() {
     setReviewingProduct(null);
   };
 
-  const handleCheckout = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleCheckout = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
     
+    // Simulation only for methods not handled by Stripe real integration
+    if (['stc_pay'].includes(paymentMethod)) {
+      setIsProcessingPayment(true);
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      setIsProcessingPayment(false);
+    }
+
     const orderData = {
       customerName,
       phone,
@@ -667,22 +1197,35 @@ export default function App() {
     e.preventDefault();
     if (!currentVendor) return;
 
+    setIsUploadingImage(true);
     const formData = new FormData(e.currentTarget);
-    const productData: Partial<Product> = {
-      nameAr: formData.get('nameAr') as string,
-      descriptionAr: formData.get('descriptionAr') as string,
-      price: parseFloat(formData.get('price') as string),
-      discountPrice: formData.get('discountPrice') ? parseFloat(formData.get('discountPrice') as string) : undefined,
-      image: formData.get('image') as string,
-      category: formData.get('category') as any,
-      vendorId: currentVendor.id,
-      vendorUserId: user?.uid,
-      ingredients: (formData.get('ingredients') as string).split(',').map(i => i.trim()),
-      occasions: (formData.get('occasions') as string).split(',').map(o => o.trim()),
-      reviews: editingProduct?.reviews || []
-    };
+    let imageUrl = formData.get('image') as string;
 
     try {
+      // If a new file is selected, upload it
+      if (productImageFile) {
+        if (!storage) {
+          throw new Error("خدمة رفع الصور غير متوفرة حالياً. يرجى التأكد من إعدادات Firebase.");
+        }
+        const storageRef = ref(storage, `products/${currentVendor.id}/${Date.now()}_${productImageFile.name}`);
+        const uploadResult = await uploadBytes(storageRef, productImageFile);
+        imageUrl = await getDownloadURL(uploadResult.ref);
+      }
+
+      const productData: Partial<Product> = {
+        nameAr: formData.get('nameAr') as string,
+        descriptionAr: formData.get('descriptionAr') as string,
+        price: parseFloat(formData.get('price') as string),
+        discountPrice: formData.get('discountPrice') ? parseFloat(formData.get('discountPrice') as string) : undefined,
+        image: imageUrl,
+        category: formData.get('category') as any,
+        vendorId: currentVendor.id,
+        vendorUserId: user?.uid,
+        ingredients: (formData.get('ingredients') as string).split(',').map(i => i.trim()),
+        occasions: (formData.get('occasions') as string).split(',').map(o => o.trim()),
+        reviews: editingProduct?.reviews || []
+      };
+
       if (editingProduct) {
         await updateDoc(doc(db, 'products', editingProduct.id), productData);
         setEditingProduct(null);
@@ -690,9 +1233,13 @@ export default function App() {
         const newDoc = doc(collection(db, 'products'));
         await setDoc(newDoc, { ...productData, id: newDoc.id });
       }
+      setProductImageFile(null);
+      setProductImagePreview(null);
       (e.target as HTMLFormElement).reset();
     } catch (error) {
       handleFirestoreError(error, editingProduct ? OperationType.UPDATE : OperationType.CREATE, 'products', setFirestoreError);
+    } finally {
+      setIsUploadingImage(false);
     }
   };
 
@@ -702,6 +1249,91 @@ export default function App() {
       await deleteDoc(doc(db, 'products', productId));
     } catch (error) {
       handleFirestoreError(error, OperationType.DELETE, 'products', setFirestoreError);
+    }
+  };
+
+  const saveBanner = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    setIsUploadingImage(true);
+    const formData = new FormData(e.currentTarget);
+    let imageUrl = formData.get('image') as string;
+
+    try {
+      if (bannerImageFile) {
+        const storageRef = ref(storage, `banners/${Date.now()}_${bannerImageFile.name}`);
+        const uploadResult = await uploadBytes(storageRef, bannerImageFile);
+        imageUrl = await getDownloadURL(uploadResult.ref);
+      }
+
+      const bannerData: Partial<Banner> = {
+        title: formData.get('title') as string,
+        subtitle: formData.get('subtitle') as string,
+        image: imageUrl,
+        order: parseInt(formData.get('order') as string) || 1,
+        location: formData.get('location') as 'top' | 'middle' | 'bottom'
+      };
+
+      if (editingBanner) {
+        await updateDoc(doc(db, 'banners', editingBanner.id), bannerData);
+        setEditingBanner(null);
+      } else {
+        const newDoc = doc(collection(db, 'banners'));
+        await setDoc(newDoc, { ...bannerData, id: newDoc.id });
+      }
+      setBannerImageFile(null);
+      setBannerImagePreview(null);
+      (e.target as HTMLFormElement).reset();
+    } catch (error) {
+      handleFirestoreError(error, editingBanner ? OperationType.UPDATE : OperationType.CREATE, 'banners', setFirestoreError);
+    } finally {
+      setIsUploadingImage(false);
+    }
+  };
+
+  const deleteBanner = async (bannerId: string) => {
+    if (!window.confirm('هل أنت متأكد من حذف هذا البنر؟')) return;
+    try {
+      await deleteDoc(doc(db, 'banners', bannerId));
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, 'banners', setFirestoreError);
+    }
+  };
+
+  const saveCategory = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    setIsUploadingImage(true);
+    const formData = new FormData(e.currentTarget);
+    let imageUrl = formData.get('image') as string;
+
+    try {
+      if (categoryImageFile) {
+        const storageRef = ref(storage, `categories/${Date.now()}_${categoryImageFile.name}`);
+        const uploadResult = await uploadBytes(storageRef, categoryImageFile);
+        imageUrl = await getDownloadURL(uploadResult.ref);
+      }
+
+      const categoryData: Partial<Category> = {
+        name: formData.get('name') as string,
+        icon: formData.get('icon') as string,
+        image: imageUrl,
+        order: parseInt(formData.get('order') as string) || 1
+      };
+
+      if (editingCategory) {
+        await updateDoc(doc(db, 'categories', editingCategory.id), categoryData);
+        setEditingCategory(null);
+      } else {
+        // Categories usually have fixed IDs in this app, but we allow adding new ones
+        const catId = formData.get('id') as string || `cat_${Date.now()}`;
+        await setDoc(doc(db, 'categories', catId), { ...categoryData, id: catId });
+      }
+      setCategoryImageFile(null);
+      setCategoryImagePreview(null);
+      (e.target as HTMLFormElement).reset();
+    } catch (error) {
+      handleFirestoreError(error, editingCategory ? OperationType.UPDATE : OperationType.CREATE, 'categories', setFirestoreError);
+    } finally {
+      setIsUploadingImage(false);
     }
   };
 
@@ -734,6 +1366,12 @@ export default function App() {
     message += `*الجوال:* ${phone}\n`;
     message += `*العنوان:* ${address}\n`;
     message += `*طريقة الاستلام:* ${deliveryType === 'delivery' ? 'توصيل' : 'استلام من الفرع'}\n`;
+    message += `*طريقة الدفع:* ${
+      paymentMethod === 'cash' ? 'كاش' : 
+      paymentMethod === 'card' ? 'بطاقة' : 
+      paymentMethod === 'apple_pay' ? 'Apple Pay' : 
+      paymentMethod === 'stc_pay' ? 'STC Pay' : 'تحويل بنكي'
+    }\n`;
     if (preOrderDate) message += `*تاريخ الطلب المسبق:* ${format(preOrderDate, 'PPP', { locale: ar })}\n`;
     message += `\n*المنتجات:*\n`;
     
@@ -761,20 +1399,6 @@ export default function App() {
     setGiftMessage('');
     setGiftCardDesign('classic');
   };
-
-  const banners = [
-    { id: 1, image: 'https://picsum.photos/seed/banner1/800/400', title: 'خصم 20% على بوكسات الشوكولاتة', subtitle: 'استخدم كود: CHOC20' },
-    { id: 2, image: 'https://picsum.photos/seed/banner2/800/400', title: 'صواني ضيافة ملكية لجميع مناسباتكم', subtitle: 'اطلب الآن' },
-    { id: 3, image: 'https://picsum.photos/seed/banner3/800/400', title: 'توصيل مجاني للطلبات فوق 200 ريال', subtitle: 'لفترة محدودة' },
-  ];
-
-  const categories = [
-    { id: 'chocolate_boxes', name: 'بوكسات', icon: '🍫', image: 'https://picsum.photos/seed/cat1/200/200' },
-    { id: 'hospitality_trays', name: 'صواني', icon: '🍽️', image: 'https://picsum.photos/seed/cat2/200/200' },
-    { id: 'daily_sweets', name: 'يومي', icon: '🍰', image: 'https://picsum.photos/seed/cat3/200/200' },
-    { id: 'gift_boxes', name: 'هدايا', icon: '🎁', image: 'https://picsum.photos/seed/cat4/200/200' },
-    { id: 'occasion_offers', name: 'عروض', icon: '🎉', image: 'https://picsum.photos/seed/cat5/200/200' },
-  ];
 
   return (
     <div className="min-h-screen bg-[#F8F9FA] font-sans pb-20 md:pb-0" dir="rtl">
@@ -888,6 +1512,17 @@ export default function App() {
                       <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
                       <span className="text-[10px] font-bold text-primary truncate max-w-[80px]">{user.displayName}</span>
                     </div>
+                  )}
+                  {user && user.email === 'aboodvv20@gmail.com' && (
+                    <Button 
+                      variant="ghost" 
+                      size="sm" 
+                      className="rounded-xl text-xs font-bold text-primary hover:bg-primary/5 gap-2"
+                      onClick={() => setCurrentView('admin-settings')}
+                    >
+                      <Settings className="w-4 h-4" />
+                      الإعدادات
+                    </Button>
                   )}
                   {currentVendor && (
                     <div className="flex items-center gap-2 px-3 py-1 bg-accent/5 rounded-xl">
@@ -1008,6 +1643,312 @@ export default function App() {
               </CardContent>
             </Card>
           </motion.div>
+        ) : currentView === 'admin-settings' && user?.email === 'aboodvv20@gmail.com' ? (
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="space-y-8"
+          >
+            <div className="flex items-center justify-between bg-white p-6 rounded-3xl shadow-sm border">
+              <div className="flex items-center gap-4">
+                <div className="w-16 h-16 bg-primary/10 rounded-2xl flex items-center justify-center text-primary">
+                  <Settings className="w-8 h-8" />
+                </div>
+                <div>
+                  <h2 className="text-2xl font-bold">إعدادات المتجر</h2>
+                  <p className="text-muted-foreground">إدارة البنرات، التصنيفات، والصور</p>
+                </div>
+              </div>
+              <Button 
+                variant="outline" 
+                className="rounded-xl h-12"
+                onClick={() => setCurrentView('store')}
+              >
+                العودة للمتجر
+              </Button>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+              {/* Banner Management */}
+              <div className="space-y-6">
+                <Card className="rounded-3xl shadow-sm border overflow-hidden">
+                  <CardHeader className="bg-secondary/5">
+                    <CardTitle className="flex items-center gap-2">
+                      <ImageIcon className="w-5 h-5" />
+                      إدارة البنرات الإعلانية
+                    </CardTitle>
+                    <CardDescription>أضف أو عدل البنرات التي تظهر في الصفحة الرئيسية</CardDescription>
+                  </CardHeader>
+                  <CardContent className="p-6 space-y-6">
+                    <form onSubmit={saveBanner} className="space-y-4 bg-secondary/5 p-4 rounded-2xl">
+                      <h4 className="font-bold text-sm">{editingBanner ? 'تعديل بنر' : 'إضافة بنر جديد'}</h4>
+                      <div className="grid grid-cols-2 gap-4">
+                        <div className="space-y-2">
+                          <Label>العنوان الرئيسي</Label>
+                          <Input name="title" defaultValue={editingBanner?.title} required className="rounded-xl" />
+                        </div>
+                        <div className="space-y-2">
+                          <Label>العنوان الفرعي</Label>
+                          <Input name="subtitle" defaultValue={editingBanner?.subtitle} required className="rounded-xl" />
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-2 gap-4">
+                        <div className="space-y-2">
+                          <Label>الترتيب</Label>
+                          <Input name="order" type="number" defaultValue={editingBanner?.order || banners.length + 1} required className="rounded-xl" />
+                        </div>
+                        <div className="space-y-2">
+                          <Label>مكان الظهور</Label>
+                          <select 
+                            name="location" 
+                            defaultValue={editingBanner?.location || 'top'} 
+                            className="w-full h-10 px-3 py-2 rounded-xl border border-input bg-background text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                            required
+                          >
+                            <option value="top">أعلى الصفحة (سلايدر)</option>
+                            <option value="middle">وسط الصفحة (بين الأقسام)</option>
+                            <option value="bottom">أسفل الصفحة</option>
+                          </select>
+                        </div>
+                      </div>
+                      <div className="space-y-2">
+                        <Label>صورة البنر</Label>
+                        <div 
+                          className={cn(
+                            "relative border-2 border-dashed rounded-2xl p-4 transition-all flex flex-col items-center justify-center gap-2 cursor-pointer hover:bg-secondary/5",
+                            bannerImagePreview ? "border-primary/50 bg-primary/5" : "border-muted-foreground/20"
+                          )}
+                          onClick={() => document.getElementById('banner-image-input')?.click()}
+                        >
+                          {bannerImagePreview ? (
+                            <div className="relative w-full aspect-[2/1] rounded-xl overflow-hidden group">
+                              <img src={bannerImagePreview} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                              <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                                <p className="text-white text-xs font-bold">تغيير الصورة</p>
+                              </div>
+                            </div>
+                          ) : (
+                            <>
+                              <Upload className="w-6 h-6 text-muted-foreground" />
+                              <p className="text-xs font-bold">اسحب الصورة هنا أو انقر للرفع</p>
+                            </>
+                          )}
+                          <input 
+                            id="banner-image-input"
+                            type="file" 
+                            accept="image/*" 
+                            className="hidden" 
+                            onChange={(e) => {
+                              const file = e.target.files?.[0];
+                              if (file) {
+                                setBannerImageFile(file);
+                                const reader = new FileReader();
+                                reader.onload = () => setBannerImagePreview(reader.result as string);
+                                reader.readAsDataURL(file);
+                              }
+                            }}
+                          />
+                        </div>
+                        <Input name="image" type="hidden" value={bannerImagePreview || ''} />
+                      </div>
+                      <div className="flex gap-2">
+                        <Button type="submit" className="flex-1 rounded-xl" disabled={isUploadingImage}>
+                          {isUploadingImage ? <Loader2 className="w-4 h-4 animate-spin" /> : (editingBanner ? 'حفظ التعديلات' : 'إضافة البنر')}
+                        </Button>
+                        {editingBanner && (
+                          <Button type="button" variant="outline" className="rounded-xl" onClick={() => setEditingBanner(null)}>إلغاء</Button>
+                        )}
+                      </div>
+                    </form>
+
+                    <div className="space-y-3">
+                      <h4 className="font-bold text-sm">البنرات الحالية</h4>
+                      <div className="grid grid-cols-1 gap-3">
+                        {banners.map(banner => (
+                          <div key={banner.id} className="flex items-center justify-between p-3 bg-white border rounded-2xl group">
+                            <div className="flex items-center gap-3">
+                              <div className="w-20 h-10 rounded-lg overflow-hidden border">
+                                <img src={banner.image} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                              </div>
+                              <div>
+                                <p className="text-xs font-bold">{banner.title}</p>
+                                <div className="flex items-center gap-2">
+                                  <p className="text-[10px] text-muted-foreground">{banner.subtitle}</p>
+                                  <span className="text-[8px] px-1.5 py-0.5 bg-primary/10 text-primary rounded-full font-bold">
+                                    {banner.location === 'top' ? 'أعلى' : banner.location === 'middle' ? 'وسط' : 'أسفل'}
+                                  </span>
+                                </div>
+                              </div>
+                            </div>
+                            <div className="flex gap-1">
+                              <Button size="icon" variant="ghost" className="h-8 w-8 rounded-full" onClick={() => setEditingBanner(banner)}>
+                                <Pencil className="w-3 h-3" />
+                              </Button>
+                              <Button size="icon" variant="ghost" className="h-8 w-8 rounded-full text-destructive" onClick={() => deleteBanner(banner.id)}>
+                                <Trash2 className="w-3 h-3" />
+                              </Button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
+              </div>
+
+              {/* Category Management */}
+              <div className="space-y-6">
+                <Card className="rounded-3xl shadow-sm border overflow-hidden">
+                  <CardHeader className="bg-secondary/5">
+                    <CardTitle className="flex items-center gap-2">
+                      <Tag className="w-5 h-5" />
+                      إدارة التصنيفات
+                    </CardTitle>
+                    <CardDescription>عدل صور وعناوين التصنيفات في المتجر</CardDescription>
+                  </CardHeader>
+                  <CardContent className="p-6 space-y-6">
+                    <form onSubmit={saveCategory} className="space-y-4 bg-secondary/5 p-4 rounded-2xl">
+                      <h4 className="font-bold text-sm">{editingCategory ? 'تعديل تصنيف' : 'إضافة تصنيف جديد'}</h4>
+                      <div className="grid grid-cols-2 gap-4">
+                        <div className="space-y-2">
+                          <Label>اسم التصنيف</Label>
+                          <Input name="name" defaultValue={editingCategory?.name} required className="rounded-xl" />
+                        </div>
+                        <div className="space-y-2">
+                          <Label>الأيقونة (Emoji)</Label>
+                          <Input name="icon" defaultValue={editingCategory?.icon} required className="rounded-xl" />
+                        </div>
+                      </div>
+                      <div className="space-y-2">
+                        <Label>الترتيب</Label>
+                        <Input name="order" type="number" defaultValue={editingCategory?.order || categories.length + 1} required className="rounded-xl" />
+                      </div>
+                      <div className="space-y-2">
+                        <Label>صورة التصنيف</Label>
+                        <div 
+                          className={cn(
+                            "relative border-2 border-dashed rounded-2xl p-4 transition-all flex flex-col items-center justify-center gap-2 cursor-pointer hover:bg-secondary/5",
+                            categoryImagePreview ? "border-primary/50 bg-primary/5" : "border-muted-foreground/20"
+                          )}
+                          onClick={() => document.getElementById('category-image-input')?.click()}
+                        >
+                          {categoryImagePreview ? (
+                            <div className="relative w-24 h-24 rounded-xl overflow-hidden group">
+                              <img src={categoryImagePreview} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                              <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                                <p className="text-white text-[10px] font-bold text-center">تغيير</p>
+                              </div>
+                            </div>
+                          ) : (
+                            <>
+                              <Upload className="w-6 h-6 text-muted-foreground" />
+                              <p className="text-xs font-bold">انقر للرفع</p>
+                            </>
+                          )}
+                          <input 
+                            id="category-image-input"
+                            type="file" 
+                            accept="image/*" 
+                            className="hidden" 
+                            onChange={(e) => {
+                              const file = e.target.files?.[0];
+                              if (file) {
+                                setCategoryImageFile(file);
+                                const reader = new FileReader();
+                                reader.onload = () => setCategoryImagePreview(reader.result as string);
+                                reader.readAsDataURL(file);
+                              }
+                            }}
+                          />
+                        </div>
+                        <Input name="image" type="hidden" value={categoryImagePreview || ''} />
+                      </div>
+                      <div className="flex gap-2">
+                        <Button type="submit" className="flex-1 rounded-xl" disabled={isUploadingImage}>
+                          {isUploadingImage ? <Loader2 className="w-4 h-4 animate-spin" /> : (editingCategory ? 'حفظ التعديلات' : 'إضافة التصنيف')}
+                        </Button>
+                        {editingCategory && (
+                          <Button type="button" variant="outline" className="rounded-xl" onClick={() => setEditingCategory(null)}>إلغاء</Button>
+                        )}
+                      </div>
+                    </form>
+
+                    <div className="space-y-3">
+                      <h4 className="font-bold text-sm">التصنيفات الحالية</h4>
+                      <div className="grid grid-cols-1 gap-3">
+                        {categories.map(cat => (
+                          <div key={cat.id} className="flex items-center justify-between p-3 bg-white border rounded-2xl group">
+                            <div className="flex items-center gap-3">
+                              <div className="w-10 h-10 rounded-lg overflow-hidden border">
+                                <img src={cat.image} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                              </div>
+                              <div>
+                                <p className="text-xs font-bold">{cat.icon} {cat.name}</p>
+                                <p className="text-[10px] text-muted-foreground">ID: {cat.id}</p>
+                              </div>
+                            </div>
+                            <Button size="icon" variant="ghost" className="h-8 w-8 rounded-full" onClick={() => setEditingCategory(cat)}>
+                              <Pencil className="w-3 h-3" />
+                            </Button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
+              </div>
+
+              {/* Bank Details Management */}
+              <div className="lg:col-span-2">
+                <Card className="rounded-3xl shadow-sm border overflow-hidden">
+                  <CardHeader className="bg-secondary/5">
+                    <CardTitle className="flex items-center gap-2">
+                      <Landmark className="w-5 h-5" />
+                      إعدادات الدفع والتحويل
+                    </CardTitle>
+                    <CardDescription>إدارة بيانات الحساب البنكي للتحويلات</CardDescription>
+                  </CardHeader>
+                  <CardContent className="p-6">
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                      <div className="space-y-2">
+                        <Label>اسم البنك</Label>
+                        <Input 
+                          value={bankDetails.bankName} 
+                          onChange={e => setBankDetails({...bankDetails, bankName: e.target.value})}
+                          className="rounded-xl"
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <Label>اسم صاحب الحساب</Label>
+                        <Input 
+                          value={bankDetails.accountName} 
+                          onChange={e => setBankDetails({...bankDetails, accountName: e.target.value})}
+                          className="rounded-xl"
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <Label>رقم الآيبان (IBAN)</Label>
+                        <Input 
+                          value={bankDetails.iban} 
+                          onChange={e => setBankDetails({...bankDetails, iban: e.target.value})}
+                          className="rounded-xl font-mono"
+                        />
+                      </div>
+                    </div>
+                    <div className="mt-4 p-4 bg-blue-50 rounded-2xl border border-blue-100 flex items-start gap-3">
+                      <div className="w-8 h-8 bg-blue-100 rounded-full flex items-center justify-center text-blue-600 shrink-0">
+                        <Smartphone className="w-4 h-4" />
+                      </div>
+                      <div className="text-xs space-y-1">
+                        <p className="font-bold text-blue-800">تنبيه بخصوص Apple Pay و STC Pay:</p>
+                        <p className="text-blue-700">يتم حالياً محاكاة عملية الدفع عبر هذه الوسائل. لربطها ببوابة دفع حقيقية (مثل Moyasar أو Stripe)، يرجى تزويدنا بمفاتيح الربط البرمجية (API Keys).</p>
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
+              </div>
+            </div>
+          </motion.div>
         ) : currentView === 'vendor-dashboard' && currentVendor ? (
           <motion.div 
             initial={{ opacity: 0, y: 20 }}
@@ -1081,8 +2022,72 @@ export default function App() {
                       </div>
                     </div>
                     <div className="space-y-2">
-                      <Label>رابط الصورة</Label>
-                      <Input name="image" defaultValue={editingProduct?.image} required className="rounded-xl" />
+                      <Label className="flex items-center justify-between">
+                        صورة المنتج
+                        {!storage && <span className="text-[10px] text-amber-600 font-bold">⚠️ خدمة الرفع غير مفعلة</span>}
+                      </Label>
+                      <div 
+                        className={cn(
+                          "relative border-2 border-dashed rounded-2xl p-4 transition-all flex flex-col items-center justify-center gap-2 cursor-pointer hover:bg-secondary/5",
+                          productImagePreview ? "border-primary/50 bg-primary/5" : "border-muted-foreground/20"
+                        )}
+                        onDragOver={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                        }}
+                        onDrop={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          const file = e.dataTransfer.files?.[0];
+                          if (file && file.type.startsWith('image/')) {
+                            setProductImageFile(file);
+                            const reader = new FileReader();
+                            reader.onload = () => setProductImagePreview(reader.result as string);
+                            reader.readAsDataURL(file);
+                          }
+                        }}
+                        onClick={() => document.getElementById('product-image-input')?.click()}
+                      >
+                        {productImagePreview ? (
+                          <div className="relative w-full aspect-video rounded-xl overflow-hidden group">
+                            <img src={productImagePreview} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                            <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                              <p className="text-white text-xs font-bold">تغيير الصورة</p>
+                            </div>
+                          </div>
+                        ) : (
+                          <>
+                            <div className="w-12 h-12 bg-secondary/20 rounded-full flex items-center justify-center text-muted-foreground">
+                              <Upload className="w-6 h-6" />
+                            </div>
+                            <div className="text-center">
+                              <p className="text-sm font-bold">اسحب الصورة هنا أو انقر للرفع</p>
+                              <p className="text-[10px] text-muted-foreground">يدعم: JPG, PNG, WebP</p>
+                            </div>
+                          </>
+                        )}
+                        <input 
+                          id="product-image-input"
+                          type="file" 
+                          accept="image/*" 
+                          className="hidden" 
+                          onChange={(e) => {
+                            const file = e.target.files?.[0];
+                            if (file) {
+                              setProductImageFile(file);
+                              const reader = new FileReader();
+                              reader.onload = () => setProductImagePreview(reader.result as string);
+                              reader.readAsDataURL(file);
+                            }
+                          }}
+                        />
+                        {isUploadingImage && (
+                          <div className="absolute inset-0 bg-white/80 backdrop-blur-sm flex items-center justify-center rounded-2xl z-10">
+                            <Loader2 className="w-8 h-8 text-primary animate-spin" />
+                          </div>
+                        )}
+                      </div>
+                      <Input name="image" type={storage ? "hidden" : "text"} value={storage ? (productImagePreview || '') : undefined} defaultValue={!storage ? editingProduct?.image : undefined} placeholder={!storage ? "أدخل رابط الصورة هنا..." : ""} className={cn(!storage && "rounded-xl")} />
                     </div>
                     <div className="space-y-2">
                       <Label>التصنيف</Label>
@@ -1108,8 +2113,15 @@ export default function App() {
                       <Input name="occasions" defaultValue={editingProduct?.occasions.join(', ')} placeholder="عيد, زواج, تخرج" className="rounded-xl" />
                     </div>
                     <div className="flex gap-2 pt-2">
-                      <Button type="submit" className="flex-1 rounded-xl h-12">
-                        {editingProduct ? 'حفظ التعديلات' : 'إضافة المنتج'}
+                      <Button type="submit" className="flex-1 rounded-xl h-12" disabled={isUploadingImage}>
+                        {isUploadingImage ? (
+                          <>
+                            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                            جاري الحفظ...
+                          </>
+                        ) : (
+                          editingProduct ? 'حفظ التعديلات' : 'إضافة المنتج'
+                        )}
                       </Button>
                       {editingProduct && (
                         <Button type="button" variant="outline" className="rounded-xl h-12" onClick={() => setEditingProduct(null)}>إلغاء</Button>
@@ -1277,7 +2289,7 @@ export default function App() {
         <section className="relative">
           <ScrollArea className="w-full whitespace-nowrap rounded-2xl">
             <div className="flex gap-4 pb-4">
-              {banners.map((banner) => (
+              {banners.filter(b => b.location === 'top' || !b.location).map((banner) => (
                 <div 
                   key={banner.id} 
                   className="relative min-w-[300px] md:min-w-[600px] h-[180px] md:h-[250px] rounded-2xl overflow-hidden shadow-md group cursor-pointer"
@@ -1361,6 +2373,20 @@ export default function App() {
         </section>
 
         {/* Main Grid Section */}
+        {banners.filter(b => b.location === 'middle').length > 0 && (
+          <section className="space-y-4">
+            {banners.filter(b => b.location === 'middle').map(banner => (
+              <div key={banner.id} className="relative w-full h-[150px] md:h-[200px] rounded-3xl overflow-hidden shadow-sm group">
+                <img src={banner.image} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                <div className="absolute inset-0 bg-black/40 flex flex-col justify-center p-8 text-white">
+                  <h3 className="text-xl md:text-2xl font-bold">{banner.title}</h3>
+                  <p className="opacity-90">{banner.subtitle}</p>
+                </div>
+              </div>
+            ))}
+          </section>
+        )}
+
         <section className="space-y-6">
           <div className="flex items-center justify-between">
             <h3 className="text-xl font-bold">جميع المنتجات</h3>
@@ -1401,6 +2427,20 @@ export default function App() {
             </div>
           )}
         </section>
+
+        {banners.filter(b => b.location === 'bottom').length > 0 && (
+          <section className="space-y-4">
+            {banners.filter(b => b.location === 'bottom').map(banner => (
+              <div key={banner.id} className="relative w-full h-[150px] md:h-[200px] rounded-3xl overflow-hidden shadow-sm group">
+                <img src={banner.image} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                <div className="absolute inset-0 bg-black/40 flex flex-col justify-center p-8 text-white">
+                  <h3 className="text-xl md:text-2xl font-bold">{banner.title}</h3>
+                  <p className="opacity-90">{banner.subtitle}</p>
+                </div>
+              </div>
+            ))}
+          </section>
+        )}
           </>
         )}
       </main>
@@ -1860,8 +2900,72 @@ export default function App() {
                   </div>
                 </div>
                 <div className="space-y-2">
-                  <Label>رابط الصورة</Label>
-                  <Input name="image" defaultValue={editingProduct?.image} required />
+                  <Label className="flex items-center justify-between">
+                    صورة المنتج
+                    {!storage && <span className="text-[10px] text-amber-600 font-bold">⚠️ خدمة الرفع غير مفعلة</span>}
+                  </Label>
+                  <div 
+                    className={cn(
+                      "relative border-2 border-dashed rounded-2xl p-4 transition-all flex flex-col items-center justify-center gap-2 cursor-pointer hover:bg-secondary/5",
+                      productImagePreview ? "border-primary/50 bg-primary/5" : "border-muted-foreground/20"
+                    )}
+                    onDragOver={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                    }}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      const file = e.dataTransfer.files?.[0];
+                      if (file && file.type.startsWith('image/')) {
+                        setProductImageFile(file);
+                        const reader = new FileReader();
+                        reader.onload = () => setProductImagePreview(reader.result as string);
+                        reader.readAsDataURL(file);
+                      }
+                    }}
+                    onClick={() => document.getElementById('product-image-input-dialog')?.click()}
+                  >
+                    {productImagePreview ? (
+                      <div className="relative w-full aspect-video rounded-xl overflow-hidden group">
+                        <img src={productImagePreview} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                        <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                          <p className="text-white text-xs font-bold">تغيير الصورة</p>
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="w-12 h-12 bg-secondary/20 rounded-full flex items-center justify-center text-muted-foreground">
+                          <Upload className="w-6 h-6" />
+                        </div>
+                        <div className="text-center">
+                          <p className="text-sm font-bold">اسحب الصورة هنا أو انقر للرفع</p>
+                          <p className="text-[10px] text-muted-foreground">يدعم: JPG, PNG, WebP</p>
+                        </div>
+                      </>
+                    )}
+                    <input 
+                      id="product-image-input-dialog"
+                      type="file" 
+                      accept="image/*" 
+                      className="hidden" 
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (file) {
+                          setProductImageFile(file);
+                          const reader = new FileReader();
+                          reader.onload = () => setProductImagePreview(reader.result as string);
+                          reader.readAsDataURL(file);
+                        }
+                      }}
+                    />
+                    {isUploadingImage && (
+                      <div className="absolute inset-0 bg-white/80 backdrop-blur-sm flex items-center justify-center rounded-2xl z-10">
+                        <Loader2 className="w-8 h-8 text-primary animate-spin" />
+                      </div>
+                    )}
+                  </div>
+                  <Input name="image" type={storage ? "hidden" : "text"} value={storage ? (productImagePreview || '') : undefined} defaultValue={!storage ? editingProduct?.image : undefined} placeholder={!storage ? "أدخل رابط الصورة هنا..." : ""} className={cn(!storage && "rounded-xl")} />
                 </div>
                 <div className="space-y-2">
                   <Label>التصنيف</Label>
@@ -1887,11 +2991,18 @@ export default function App() {
                   <Input name="occasions" defaultValue={editingProduct?.occasions.join(', ')} placeholder="عيد, زواج, تخرج" />
                 </div>
                 <div className="flex gap-2 pt-2">
-                  <Button type="submit" className="flex-1 rounded-xl">
-                    {editingProduct ? 'حفظ التعديلات' : 'إضافة المنتج'}
+                  <Button type="submit" className="flex-1 rounded-xl h-12" disabled={isUploadingImage}>
+                    {isUploadingImage ? (
+                      <>
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        جاري الحفظ...
+                      </>
+                    ) : (
+                      editingProduct ? 'حفظ التعديلات' : 'إضافة المنتج'
+                    )}
                   </Button>
                   {editingProduct && (
-                    <Button type="button" variant="outline" className="rounded-xl" onClick={() => setEditingProduct(null)}>إلغاء</Button>
+                    <Button type="button" variant="outline" className="rounded-xl h-12" onClick={() => setEditingProduct(null)}>إلغاء</Button>
                   )}
                 </div>
               </form>
@@ -2110,193 +3221,24 @@ export default function App() {
             <DialogTitle className="text-2xl font-bold">تفاصيل الطلب</DialogTitle>
           </DialogHeader>
           
-          <form onSubmit={handleCheckout} className="space-y-6 py-4">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label htmlFor="name">الاسم بالكامل</Label>
-                <Input 
-                  id="name" 
-                  placeholder="أدخل اسمك" 
-                  required 
-                  value={customerName}
-                  onChange={e => setCustomerName(e.target.value)}
-                />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="phone">رقم الجوال</Label>
-                <Input 
-                  id="phone" 
-                  placeholder="05xxxxxxxx" 
-                  required 
-                  value={phone}
-                  onChange={e => setPhone(e.target.value)}
-                />
-              </div>
-            </div>
-
-            <div className="space-y-2">
-              <Label>طريقة الاستلام</Label>
-              <div className="grid grid-cols-2 gap-4">
-                <Button 
-                  type="button"
-                  variant={deliveryType === 'delivery' ? 'default' : 'outline'}
-                  className="h-14 rounded-xl gap-2"
-                  onClick={() => setDeliveryType('delivery')}
-                >
-                  <Truck className="w-5 h-5" />
-                  توصيل
-                </Button>
-                <Button 
-                  type="button"
-                  variant={deliveryType === 'pickup' ? 'default' : 'outline'}
-                  className="h-14 rounded-xl gap-2"
-                  onClick={() => setDeliveryType('pickup')}
-                >
-                  <Store className="w-5 h-5" />
-                  استلام من الفرع
-                </Button>
-              </div>
-            </div>
-
-            {deliveryType === 'delivery' && (
-              <div className="space-y-2">
-                <Label htmlFor="address">عنوان التوصيل</Label>
-                <Input 
-                  id="address" 
-                  placeholder="الحي، الشارع، رقم المنزل" 
-                  required 
-                  value={address}
-                  onChange={e => setAddress(e.target.value)}
-                />
-              </div>
-            )}
-
-            <div className="space-y-2">
-              <Label>طلب مسبق (اختياري)</Label>
-              <Popover>
-                <PopoverTrigger
-                  className={cn(
-                    buttonVariants({ variant: "outline" }),
-                    "w-full h-12 justify-start text-right font-normal rounded-xl",
-                    !preOrderDate && "text-muted-foreground"
-                  )}
-                >
-                  <CalendarIcon className="ml-2 h-4 w-4" />
-                  {preOrderDate ? format(preOrderDate, "PPP", { locale: ar }) : <span>اختر تاريخ الطلب المسبق</span>}
-                </PopoverTrigger>
-                <PopoverContent className="w-auto p-0" align="start">
-                  <Calendar
-                    mode="single"
-                    selected={preOrderDate}
-                    onSelect={setPreOrderDate}
-                    initialFocus
-                    disabled={(date) => date < new Date()}
-                  />
-                </PopoverContent>
-              </Popover>
-            </div>
-
-            <div className="space-y-2">
-              <Label>طريقة الدفع</Label>
-              <div className="grid grid-cols-2 gap-4">
-                <Button 
-                  type="button"
-                  variant={paymentMethod === 'cash' ? 'default' : 'outline'}
-                  className="h-14 rounded-xl gap-2"
-                  onClick={() => setPaymentMethod('cash')}
-                >
-                  <Banknote className="w-5 h-5" />
-                  كاش
-                </Button>
-                <Button 
-                  type="button"
-                  variant={paymentMethod === 'card' ? 'default' : 'outline'}
-                  className="h-14 rounded-xl gap-2"
-                  onClick={() => setPaymentMethod('card')}
-                >
-                  <CreditCard className="w-5 h-5" />
-                  بطاقة مدى / فيزا
-                </Button>
-              </div>
-            </div>
-
-            <div className="space-y-4 border-t pt-4">
-              <div className="flex items-center justify-between">
-                <div className="space-y-0.5">
-                  <Label className="text-base">هل هذا الطلب هدية؟</Label>
-                  <p className="text-sm text-muted-foreground">سنقوم بإضافة بطاقة إهداء أنيقة مع طلبك.</p>
-                </div>
-                <Checkbox 
-                  checked={isGift} 
-                  onCheckedChange={(checked) => setIsGift(checked as boolean)}
-                  className="h-6 w-6 rounded-md"
-                />
-              </div>
-
-              {isGift && (
-                <motion.div 
-                  initial={{ opacity: 0, height: 0 }}
-                  animate={{ opacity: 1, height: 'auto' }}
-                  className="space-y-4 pt-2"
-                >
-                  <div className="space-y-2">
-                    <Label>اختر تصميم البطاقة</Label>
-                    <div className="grid grid-cols-3 gap-2">
-                      {[
-                        { id: 'classic', label: 'كلاسيك', color: 'bg-[#3E2723]' },
-                        { id: 'gold', label: 'ذهبي', color: 'bg-[#D4AF37]' },
-                        { id: 'floral', label: 'وردي', color: 'bg-[#F5E6E8]' }
-                      ].map((design) => (
-                        <button
-                          key={design.id}
-                          type="button"
-                          onClick={() => setGiftCardDesign(design.id)}
-                          className={cn(
-                            "flex flex-col items-center gap-2 p-3 rounded-xl border-2 transition-all",
-                            giftCardDesign === design.id ? "border-primary bg-primary/5" : "border-transparent bg-secondary/20"
-                          )}
-                        >
-                          <div className={cn("w-full h-8 rounded-md shadow-sm", design.color)} />
-                          <span className="text-xs font-bold">{design.label}</span>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="gift-message">رسالة الإهداء</Label>
-                    <textarea 
-                      id="gift-message"
-                      className="w-full min-h-[100px] rounded-xl border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
-                      placeholder="اكتب رسالتك هنا..."
-                      value={giftMessage}
-                      onChange={e => setGiftMessage(e.target.value)}
-                    />
-                  </div>
-                </motion.div>
-              )}
-            </div>
-
-            <Separator />
-
-            <div className="bg-secondary/10 p-4 rounded-xl space-y-2">
-              <div className="flex justify-between text-sm">
-                <span>قيمة المنتجات:</span>
-                <span>{cartTotal} ر.س</span>
-              </div>
-              <div className="flex justify-between text-sm">
-                <span>رسوم التوصيل:</span>
-                <span>{deliveryType === 'delivery' ? '15 ر.س' : '0 ر.س'}</span>
-              </div>
-              <div className="flex justify-between text-lg font-bold text-primary pt-2 border-t">
-                <span>الإجمالي النهائي:</span>
-                <span>{cartTotal + (deliveryType === 'delivery' ? 15 : 0)} ر.س</span>
-              </div>
-            </div>
-
-            <Button type="submit" className="w-full h-14 text-lg font-bold rounded-xl shadow-lg">
-              تأكيد الطلب
-            </Button>
-          </form>
+          <Elements stripe={stripePromise}>
+            <CheckoutForm 
+              customerName={customerName} setCustomerName={setCustomerName}
+              phone={phone} setPhone={setPhone}
+              address={address} setAddress={setAddress}
+              deliveryType={deliveryType} setDeliveryType={setDeliveryType}
+              paymentMethod={paymentMethod} setPaymentMethod={setPaymentMethod}
+              preOrderDate={preOrderDate} setPreOrderDate={setPreOrderDate}
+              isGift={isGift} setIsGift={setIsGift}
+              giftMessage={giftMessage} setGiftMessage={setGiftMessage}
+              giftCardDesign={giftCardDesign} setGiftCardDesign={setGiftCardDesign}
+              cartTotal={cartTotal}
+              onSuccess={() => handleCheckout({ preventDefault: () => {} } as React.FormEvent)}
+              isProcessingPayment={isProcessingPayment}
+              setIsProcessingPayment={setIsProcessingPayment}
+              bankDetails={bankDetails}
+            />
+          </Elements>
         </DialogContent>
       </Dialog>
 
@@ -2315,9 +3257,11 @@ export default function App() {
             <div className="space-y-2">
               <DialogTitle className="text-3xl font-bold text-green-600">تم الطلب بنجاح!</DialogTitle>
               <p className="text-muted-foreground">
-                {isGift 
-                  ? "شكراً لثقتكم بنا. سيتم إرفاق بطاقة الإهداء مع طلبكم والتواصل معكم قريباً لتأكيد الطلب."
-                  : "شكراً لثقتكم بنا. سيتم التواصل معكم قريباً لتأكيد الطلب."}
+                {paymentMethod === 'bank_transfer' 
+                  ? "تم تسجيل طلبك. يرجى إرسال صورة التحويل البنكي عند التواصل مع البائع عبر الواتساب."
+                  : isGift 
+                    ? "شكراً لثقتكم بنا. سيتم إرفاق بطاقة الإهداء مع طلبكم والتواصل معكم قريباً لتأكيد الطلب."
+                    : "شكراً لثقتكم بنا. سيتم التواصل معكم قريباً لتأكيد الطلب."}
               </p>
             </div>
 

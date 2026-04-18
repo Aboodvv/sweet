@@ -50,5 +50,15 @@ service cloud.firestore {
       allow update: if isAdmin() || (isAuthenticated() && isValidProduct(request.resource.data) && request.auth.uid == resource.data.vendorUserId);
       allow delete: if isAdmin() || (isAuthenticated() && request.auth.uid == resource.data.vendorUserId);
     }
+
+    match /banners/{bannerId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /categories/{categoryId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
   }
 }

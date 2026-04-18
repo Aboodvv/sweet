@@ -1,6 +1,7 @@
 import { initializeApp } from 'firebase/app';
 import { getAuth, GoogleAuthProvider, signInWithPopup } from 'firebase/auth';
 import { getFirestore } from 'firebase/firestore';
+import { getStorage } from 'firebase/storage';
 import firebaseAppletConfig from '../firebase-applet-config.json';
 
 // Support both environment variables (Vercel) and the config file
@@ -34,5 +35,16 @@ try {
 
 export const db = firestoreDb;
 export const auth = getAuth(app);
+
+// Initialize Storage with a fallback mechanism
+let storageInstance;
+try {
+  storageInstance = getStorage(app);
+} catch (e) {
+  console.warn("Firebase Storage is not available. Image uploads will be disabled.", e);
+  storageInstance = null;
+}
+
+export const storage = storageInstance;
 export const googleProvider = new GoogleAuthProvider();
 export { signInWithPopup };
