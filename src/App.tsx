@@ -1167,9 +1167,11 @@ export default function App() {
             await createUserWithEmailAndPassword(auth, vendorEmail, vendorPassword);
           } catch (createError: any) {
             console.error("Auth creation failed:", createError);
+            alert("نم العثور على بياناتك ولكن تعذر إنشاء جلسة آمنة. قد لا تتمكن من إضافة منتجات.");
           }
         } else {
           console.error("Auth login failed:", authError);
+          alert("كلمة المرور غير مطابقة لنظام الحماية المتقدم. قد لا تتمكن من إضافة منتجات.");
         }
       }
 
@@ -1234,30 +1236,51 @@ export default function App() {
     let imageUrl = formData.get('image') as string;
 
     try {
+      // Ensure vendor is authenticated in Firebase Auth
+      if (!auth.currentUser) {
+        throw new Error("يجب تسجيل الدخول كبائع لإضافة المنتجات. يرجى المحاولة مرة أخرى.");
+      }
+
       // If a new file is selected, upload it
       if (productImageFile) {
+        // Limit image size to 2MB for better performance
+        if (productImageFile.size > 2 * 1024 * 1024) {
+          throw new Error("حجم الصورة كبير جداً. يرجى اختيار صورة أقل من 2 ميجابايت.");
+        }
+
         if (!storage) {
           throw new Error("خدمة رفع الصور غير متوفرة حالياً. يرجى التأكد من إعدادات Firebase.");
         }
         const storageRef = ref(storage, `products/${currentVendor.id}/${Date.now()}_${productImageFile.name}`);
         const uploadResult = await uploadBytes(storageRef, productImageFile);
         imageUrl = await getDownloadURL(uploadResult.ref);
+      } else if (imageUrl && imageUrl.startsWith('data:image')) {
+        // If image is still a base64 string (meaning no file selected but preview exists)
+        // This shouldn't really happen for a new product if a file was selected but we'll guard it
+        if (!editingProduct) {
+           throw new Error("يرجى اختيار صورة للمنتج ليتم رفعها.");
+        }
+      }
+
+      // Final check for valid image URL
+      if (!imageUrl && !editingProduct) {
+        throw new Error("يرجى تزويد رابط صورة أو اختيار صورة للرفع.");
       }
 
       const productData: Product = {
         id: editingProduct?.id || '',
-        name: formData.get('nameAr') as string, // Fallback to Arabic name for English field
+        name: formData.get('nameAr') as string,
         nameAr: formData.get('nameAr') as string,
-        description: formData.get('descriptionAr') as string, // Fallback to Arabic description
+        description: formData.get('descriptionAr') as string,
         descriptionAr: formData.get('descriptionAr') as string,
         price: parseFloat(formData.get('price') as string),
         discountPrice: formData.get('discountPrice') ? parseFloat(formData.get('discountPrice') as string) : undefined,
-        image: imageUrl,
-        staticImage: imageUrl,
+        image: imageUrl || (editingProduct?.image || ''),
+        staticImage: imageUrl || (editingProduct?.image || ''),
         category: formData.get('category') as any,
-        categoryImage: imageUrl, // Fallback to product image
+        categoryImage: imageUrl || (editingProduct?.image || ''),
         vendorId: currentVendor.id,
-        vendorUserId: user?.uid || auth.currentUser?.uid,
+        vendorUserId: auth.currentUser?.uid,
         ingredients: (formData.get('ingredients') as string).split(',').map(i => i.trim()).filter(i => i !== ""),
         occasions: (formData.get('occasions') as string).split(',').map(o => o.trim()).filter(o => o !== ""),
         reviews: editingProduct?.reviews || []
@@ -1266,14 +1289,18 @@ export default function App() {
       if (editingProduct) {
         await updateDoc(doc(db, 'products', editingProduct.id), { ...productData });
         setEditingProduct(null);
+        alert('تم تحديث المنتج بنجاح');
       } else {
         const newDoc = doc(collection(db, 'products'));
         await setDoc(newDoc, { ...productData, id: newDoc.id });
+        alert('تم إضافة المنتج بنجاح');
       }
       setProductImageFile(null);
       setProductImagePreview(null);
       (e.target as HTMLFormElement).reset();
-    } catch (error) {
+    } catch (error: any) {
+      console.error("Product Save Error:", error);
+      alert(`فشل الحفظ: ${error.message || 'حدث خطأ غير متوقع'}`);
       handleFirestoreError(error, editingProduct ? OperationType.UPDATE : OperationType.CREATE, 'products', setFirestoreError);
     } finally {
       setIsUploadingImage(false);
