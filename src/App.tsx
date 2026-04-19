@@ -67,7 +67,16 @@ import { products as initialProducts } from './data/products';
 import { vendors as initialVendors } from './data/vendors';
 import { Product, CartItem, OrderDetails, Review, Vendor, Banner, Category } from './types';
 import { cn } from '@/lib/utils';
-import { db, auth, storage, googleProvider, signInWithPopup } from './firebase';
+import { 
+  db, 
+  auth, 
+  storage, 
+  googleProvider, 
+  signInWithPopup, 
+  signInWithEmailAndPassword, 
+  createUserWithEmailAndPassword,
+  updatePassword as updateAuthPassword
+} from './firebase';
 import { 
   collection, 
   onSnapshot, 
@@ -1146,6 +1155,24 @@ export default function App() {
     });
     
     if (vendor) {
+      // Try to sign in with Firebase Auth to get the UID and satisfy security rules
+      const vendorEmail = vendor.email || `${cleanInputPhone}@sweets-store.com`;
+      const vendorPassword = loginPassword;
+
+      try {
+        await signInWithEmailAndPassword(auth, vendorEmail, vendorPassword);
+      } catch (authError: any) {
+        if (authError.code === 'auth/user-not-found') {
+          try {
+            await createUserWithEmailAndPassword(auth, vendorEmail, vendorPassword);
+          } catch (createError: any) {
+            console.error("Auth creation failed:", createError);
+          }
+        } else {
+          console.error("Auth login failed:", authError);
+        }
+      }
+
       setCurrentVendor(vendor);
       // If password field is missing, it's effectively "must change password"
       const needsPasswordChange = vendor.mustChangePassword !== false && ((vendor as any).password === undefined || vendor.mustChangePassword);
@@ -1180,6 +1207,11 @@ export default function App() {
     if (!currentVendor) return;
 
     try {
+      // Update in Auth if logged in
+      if (auth.currentUser) {
+        await updateAuthPassword(auth.currentUser, newPassword);
+      }
+      
       await updateDoc(doc(db, 'vendors', currentVendor.id), {
         password: newPassword,
         mustChangePassword: false
@@ -1212,22 +1244,27 @@ export default function App() {
         imageUrl = await getDownloadURL(uploadResult.ref);
       }
 
-      const productData: Partial<Product> = {
+      const productData: Product = {
+        id: editingProduct?.id || '',
+        name: formData.get('nameAr') as string, // Fallback to Arabic name for English field
         nameAr: formData.get('nameAr') as string,
+        description: formData.get('descriptionAr') as string, // Fallback to Arabic description
         descriptionAr: formData.get('descriptionAr') as string,
         price: parseFloat(formData.get('price') as string),
         discountPrice: formData.get('discountPrice') ? parseFloat(formData.get('discountPrice') as string) : undefined,
         image: imageUrl,
+        staticImage: imageUrl,
         category: formData.get('category') as any,
+        categoryImage: imageUrl, // Fallback to product image
         vendorId: currentVendor.id,
-        vendorUserId: user?.uid,
-        ingredients: (formData.get('ingredients') as string).split(',').map(i => i.trim()),
-        occasions: (formData.get('occasions') as string).split(',').map(o => o.trim()),
+        vendorUserId: user?.uid || auth.currentUser?.uid,
+        ingredients: (formData.get('ingredients') as string).split(',').map(i => i.trim()).filter(i => i !== ""),
+        occasions: (formData.get('occasions') as string).split(',').map(o => o.trim()).filter(o => o !== ""),
         reviews: editingProduct?.reviews || []
       };
 
       if (editingProduct) {
-        await updateDoc(doc(db, 'products', editingProduct.id), productData);
+        await updateDoc(doc(db, 'products', editingProduct.id), { ...productData });
         setEditingProduct(null);
       } else {
         const newDoc = doc(collection(db, 'products'));
