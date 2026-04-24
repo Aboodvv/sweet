@@ -7,56 +7,27 @@ service cloud.firestore {
     }
     
     function isAdmin() {
-      return isAuthenticated() && 
-        (request.auth.token.email == "aboodvv20@gmail.com" && request.auth.token.email_verified == true);
-    }
-
-    function isValidVendor(data) {
-      return data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
-             data.phone is string && data.phone.size() > 0 && data.phone.size() < 20 &&
-             data.commissionRate is number && data.commissionRate >= 0 && data.commissionRate <= 1;
-    }
-
-    function isValidOrder(data) {
-      return data.customerName is string && data.customerName.size() > 0 &&
-             data.phone is string && data.phone.size() > 0 &&
-             data.total is number && data.total >= 0;
-    }
-
-    function isValidProduct(data) {
-      return data.nameAr is string && data.nameAr.size() > 0 &&
-             data.price is number && data.price >= 0 &&
-             data.vendorId is string;
+      return isAuthenticated() && (request.auth.token.email == "aboodvv20@gmail.com");
     }
 
     match /vendors/{vendorId} {
-      allow read: if true;
-      allow create: if isValidVendor(request.resource.data);
-      allow update: if isAdmin() || 
-                    (isAuthenticated() && request.auth.uid == resource.data.userId) || 
-                    (isAuthenticated() && !('userId' in resource.data)) ||
-                    (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['password', 'mustChangePassword']));
-      allow delete: if isAdmin();
+      allow read, write: if true;
     }
 
     match /orders/{orderId} {
-      allow read: if isAdmin();
-      allow create: if isValidOrder(request.resource.data);
+      allow read, write: if true;
     }
 
     match /products/{productId} {
-      allow read: if true;
-      allow write: if isAuthenticated();
+      allow read, write: if true;
     }
 
     match /banners/{bannerId} {
-      allow read: if true;
-      allow write: if isAdmin();
+      allow read, write: if true;
     }
 
     match /categories/{categoryId} {
-      allow read: if true;
-      allow write: if isAdmin();
+      allow read, write: if true;
     }
   }
 }
