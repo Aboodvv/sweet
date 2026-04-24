@@ -94,6 +94,7 @@ import { User } from 'firebase/auth';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { loadStripe } from '@stripe/stripe-js';
 import { Elements, CardElement, useStripe, useElements, PaymentRequestButtonElement } from '@stripe/react-stripe-js';
+import { compressImage } from './compressImage';
 
 const stripePromise = loadStripe(import.meta.env.VITE_STRIPE_PUBLISHABLE_KEY);
 
@@ -1261,8 +1262,13 @@ export default function App() {
         }
 
         if (!storage) {
-          console.warn("Storage not available, using fallback image.");
-          imageUrl = "https://picsum.photos/400/400";
+          console.warn("Storage not available, compressing to base64 fallback.");
+          try {
+             imageUrl = await compressImage(productImageFile);
+          } catch(compressErr) {
+             console.error("Compression failed:", compressErr);
+             imageUrl = "https://picsum.photos/400/400";
+          }
         } else {
           try {
             const storageRef = ref(storage, `products/${currentVendor.id}/${Date.now()}_${productImageFile.name}`);
@@ -1270,8 +1276,13 @@ export default function App() {
             imageUrl = await getDownloadURL(uploadResult.ref);
           } catch (storageError: any) {
             console.error("Storage upload error:", storageError);
-            imageUrl = "https://picsum.photos/400/400";
-            alert("ملاحظة: حدثت مشكلة في التخزين فتم استخدام صورة افتراضية، ولكن سيتم حفظ بيانات المنتج بشكل طبيعي. (السبب: " + (storageError.message || 'غير معروف') + ")");
+            try {
+               imageUrl = await compressImage(productImageFile);
+               alert("ملاحظة: حدثت مشكلة في التخزين السحابي فتم حفظ الصورة المصغرة في قاعدة البيانات، ولكن سيتم حفظ بيانات المنتج بشكل طبيعي. (السبب: " + (storageError.message || 'غير معروف') + ")");
+            } catch(compressErr) {
+               imageUrl = "https://picsum.photos/400/400";
+               alert("ملاحظة: حدثت مشكلة في التخزين فتم استخدام صورة افتراضية. (السبب: " + (storageError.message || 'غير معروف') + ")");
+            }
           }
         }
       } else if (imageUrl && imageUrl.startsWith('data:image')) {
@@ -1290,19 +1301,19 @@ export default function App() {
 
       const productData: any = {
         id: editingProduct?.id || '',
-        name: formData.get('nameAr') as string || '',
-        nameAr: formData.get('nameAr') as string || '',
-        description: formData.get('descriptionAr') as string || '',
-        descriptionAr: formData.get('descriptionAr') as string || '',
-        price: parseFloat(formData.get('price') as string || '0'),
-        image: imageUrl || (editingProduct?.image || ''),
-        staticImage: imageUrl || (editingProduct?.image || ''),
+        name: (formData.get('nameAr') as string)?.trim() || 'منتج جديد',
+        nameAr: (formData.get('nameAr') as string)?.trim() || 'منتج جديد',
+        description: (formData.get('descriptionAr') as string)?.trim() || 'لا يوجد وصف لهذا المنتج',
+        descriptionAr: (formData.get('descriptionAr') as string)?.trim() || 'لا يوجد وصف لهذا المنتج',
+        price: parseFloat(formData.get('price') as string) || 99,
+        image: imageUrl || (editingProduct?.image || 'https://picsum.photos/400/400'),
+        staticImage: imageUrl || (editingProduct?.image || 'https://picsum.photos/400/400'),
         category: formData.get('category') as string || 'chocolate_boxes',
-        categoryImage: imageUrl || (editingProduct?.image || ''),
+        categoryImage: imageUrl || (editingProduct?.image || 'https://picsum.photos/400/400'),
         vendorId: currentVendor.id,
         vendorUserId: auth.currentUser?.uid || '',
-        ingredients: ingredientsRaw ? ingredientsRaw.split(',').map(i => i.trim()).filter(i => i !== "") : [],
-        occasions: occasionsRaw ? occasionsRaw.split(',').map(o => o.trim()).filter(o => o !== "") : [],
+        ingredients: ingredientsRaw ? ingredientsRaw.split(',').map(i => i.trim()).filter(i => i !== "") : ['مكونات طبيعية'],
+        occasions: occasionsRaw ? occasionsRaw.split(',').map(o => o.trim()).filter(o => o !== "") : ['عام'],
         reviews: editingProduct?.reviews || []
       };
 
@@ -1360,9 +1371,19 @@ export default function App() {
 
     try {
       if (bannerImageFile) {
-        const storageRef = ref(storage, `banners/${Date.now()}_${bannerImageFile.name}`);
-        const uploadResult = await uploadBytes(storageRef, bannerImageFile);
-        imageUrl = await getDownloadURL(uploadResult.ref);
+        if (!storage) {
+           console.warn("Storage not available");
+           try { imageUrl = await compressImage(bannerImageFile); } catch (e) { }
+        } else {
+           try {
+             const storageRef = ref(storage, `banners/${Date.now()}_${bannerImageFile.name}`);
+             const uploadResult = await uploadBytes(storageRef, bannerImageFile);
+             imageUrl = await getDownloadURL(uploadResult.ref);
+           } catch (err: any) {
+             console.error("Storage upload error for banner", err);
+             try { imageUrl = await compressImage(bannerImageFile); } catch (e) { }
+           }
+        }
       }
 
       const bannerData: Partial<Banner> = {
@@ -1407,9 +1428,19 @@ export default function App() {
 
     try {
       if (categoryImageFile) {
-        const storageRef = ref(storage, `categories/${Date.now()}_${categoryImageFile.name}`);
-        const uploadResult = await uploadBytes(storageRef, categoryImageFile);
-        imageUrl = await getDownloadURL(uploadResult.ref);
+        if (!storage) {
+           console.warn("Storage not available");
+           try { imageUrl = await compressImage(categoryImageFile); } catch (e) {}
+        } else {
+           try {
+             const storageRef = ref(storage, `categories/${Date.now()}_${categoryImageFile.name}`);
+             const uploadResult = await uploadBytes(storageRef, categoryImageFile);
+             imageUrl = await getDownloadURL(uploadResult.ref);
+           } catch (err: any) {
+             console.error("Storage error category", err);
+             try { imageUrl = await compressImage(categoryImageFile); } catch(e) {}
+           }
+        }
       }
 
       const categoryData: Partial<Category> = {
